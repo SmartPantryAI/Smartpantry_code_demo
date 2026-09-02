@@ -4,8 +4,9 @@ const express  = require('express');
 const mysql    = require('mysql2');
 const session  = require('express-session');
 const passport = require('passport');
-const Kakao    = require('passport-kakao').Strategy;
-const Google   = require('passport-google-oauth20').Strategy;
+// 시연용 간단 로그인으로 대체 - 소셜 로그인 재활성화 시 주석 해제
+// const Kakao    = require('passport-kakao').Strategy;
+// const Google   = require('passport-google-oauth20').Strategy;
 const axios    = require('axios');
 const webpush  = require('web-push');
 const cron     = require('node-cron');
@@ -51,60 +52,60 @@ const query = (sql, params = []) =>
         db.query(sql, params, (err, rows) => err ? reject(err) : resolve(rows))
     );
 
-// ── Passport 소셜 로그인 ──────────────────────────────────────
-const socialLoginVerify = async (snsId, provider, name, email, done) => {
-    try {
-        const providerUserId = String(snsId);
-
-        // 기존 계정 조회
-        const rows = await query(
-            `SELECT u.* FROM users u
-             JOIN social_accounts sa ON u.id = sa.user_id
-             WHERE sa.provider = ? AND sa.provider_user_id = ?`,
-            [provider, providerUserId]
-        );
-
-        if (rows.length > 0) {
-            // 이메일 없으면 업데이트
-            if (email && !rows[0].email) {
-                await query('UPDATE users SET email = ? WHERE id = ?', [email, rows[0].id]);
-            }
-            return done(null, rows[0]);
-        }
-
-        // 신규 가입
-        const result = await query(
-            'INSERT INTO users (name, email, is_agreed) VALUES (?, ?, 0)',
-            [name || '유저', email || null]
-        );
-        await query(
-            'INSERT INTO social_accounts (user_id, provider, provider_user_id) VALUES (?, ?, ?)',
-            [result.insertId, provider, providerUserId]
-        );
-        return done(null, { id: result.insertId, name: name || '유저', email, is_agreed: 0, is_admin: 0 });
-
-    } catch (err) {
-        return done(err);
-    }
-};
-
-passport.use(new Kakao({
-    clientID:    process.env.KAKAO_CLIENT_ID,
-    clientSecret:process.env.KAKAO_CLIENT_SECRET,
-    callbackURL: 'https://smpa.aikopo.net/auth/kakao/callback',
-}, (at, rt, profile, done) => {
-    const name = profile.displayName || profile._json?.kakao_account?.profile?.nickname || '유저';
-    socialLoginVerify(profile.id, 'kakao', name, null, done);
-}));
-
-passport.use(new Google({
-    clientID:    process.env.GOOGLE_CLIENT_ID,
-    clientSecret:process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: 'https://smpa.aikopo.net/auth/google/callback',
-}, (at, rt, profile, done) => {
-    const email = profile.emails?.[0]?.value || null;
-    socialLoginVerify(profile.id, 'google', profile.displayName, email, done);
-}));
+// ── Passport 소셜 로그인 (시연용 간단 로그인으로 대체, 아래 전체 주석 처리) ──────
+// const socialLoginVerify = async (snsId, provider, name, email, done) => {
+//     try {
+//         const providerUserId = String(snsId);
+//
+//         // 기존 계정 조회
+//         const rows = await query(
+//             `SELECT u.* FROM users u
+//              JOIN social_accounts sa ON u.id = sa.user_id
+//              WHERE sa.provider = ? AND sa.provider_user_id = ?`,
+//             [provider, providerUserId]
+//         );
+//
+//         if (rows.length > 0) {
+//             // 이메일 없으면 업데이트
+//             if (email && !rows[0].email) {
+//                 await query('UPDATE users SET email = ? WHERE id = ?', [email, rows[0].id]);
+//             }
+//             return done(null, rows[0]);
+//         }
+//
+//         // 신규 가입
+//         const result = await query(
+//             'INSERT INTO users (name, email, is_agreed) VALUES (?, ?, 0)',
+//             [name || '유저', email || null]
+//         );
+//         await query(
+//             'INSERT INTO social_accounts (user_id, provider, provider_user_id) VALUES (?, ?, ?)',
+//             [result.insertId, provider, providerUserId]
+//         );
+//         return done(null, { id: result.insertId, name: name || '유저', email, is_agreed: 0, is_admin: 0 });
+//
+//     } catch (err) {
+//         return done(err);
+//     }
+// };
+//
+// passport.use(new Kakao({
+//     clientID:    process.env.KAKAO_CLIENT_ID,
+//     clientSecret:process.env.KAKAO_CLIENT_SECRET,
+//     callbackURL: 'https://smpa.aikopo.net/auth/kakao/callback',
+// }, (at, rt, profile, done) => {
+//     const name = profile.displayName || profile._json?.kakao_account?.profile?.nickname || '유저';
+//     socialLoginVerify(profile.id, 'kakao', name, null, done);
+// }));
+//
+// passport.use(new Google({
+//     clientID:    process.env.GOOGLE_CLIENT_ID,
+//     clientSecret:process.env.GOOGLE_CLIENT_SECRET,
+//     callbackURL: 'https://smpa.aikopo.net/auth/google/callback',
+// }, (at, rt, profile, done) => {
+//     const email = profile.emails?.[0]?.value || null;
+//     socialLoginVerify(profile.id, 'google', profile.displayName, email, done);
+// }));
 
 passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
@@ -199,17 +200,42 @@ app.patch('/api/user/consents', isLoggedIn, async (req, res) => {
     } catch { res.status(500).json({ success: false }); }
 });
 
-app.get('/auth/kakao', passport.authenticate('kakao'));
-app.get('/auth/kakao/callback',
-    passport.authenticate('kakao', { failureRedirect: '/' }),
-    (req, res) => req.session.save(() => res.redirect('/'))
-);
+// app.get('/auth/kakao', passport.authenticate('kakao'));
+// app.get('/auth/kakao/callback',
+//     passport.authenticate('kakao', { failureRedirect: '/' }),
+//     (req, res) => req.session.save(() => res.redirect('/'))
+// );
+//
+// app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
+// app.get('/auth/google/callback',
+//     passport.authenticate('google', { failureRedirect: '/' }),
+//     (req, res) => req.session.save(() => res.redirect('/'))
+// );
 
-app.get('/auth/google', passport.authenticate('google', { scope: ['profile', 'email'] }));
-app.get('/auth/google/callback',
-    passport.authenticate('google', { failureRedirect: '/' }),
-    (req, res) => req.session.save(() => res.redirect('/'))
-);
+// ── 시연용 간단 로그인 (소셜 로그인 대체) ──────────────────────
+// OAuth 없이 고정된 "사용자" 계정으로 즉시 로그인시킨다. 매번 새 계정이 생기지 않도록
+// 고정 이메일을 식별자로 find-or-create한다.
+const DEMO_USER_EMAIL = 'demo@smartpantry.local';
+app.get('/auth/demo-login', async (req, res) => {
+    try {
+        const rows = await query('SELECT * FROM users WHERE email = ?', [DEMO_USER_EMAIL]);
+        let user = rows[0];
+        if (!user) {
+            const result = await query(
+                'INSERT INTO users (name, email, is_agreed) VALUES (?, ?, 0)',
+                ['사용자', DEMO_USER_EMAIL]
+            );
+            user = { id: result.insertId, name: '사용자', email: DEMO_USER_EMAIL, is_agreed: 0, is_admin: 0 };
+        }
+        req.login(user, (err) => {
+            if (err) { console.error('데모 로그인 오류:', err.message); return res.status(500).json({ success: false }); }
+            req.session.save(() => res.redirect('/'));
+        });
+    } catch (err) {
+        console.error('데모 로그인 오류:', err.message);
+        res.status(500).json({ success: false });
+    }
+});
 
 app.get('/logout', (req, res) => {
     req.logout(() => {
