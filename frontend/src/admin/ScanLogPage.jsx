@@ -8,6 +8,8 @@ const ScanLogPage = () => {
   const [logs, setLogs]           = useState([]);
   const [loading, setLoading]     = useState(true);
   const [selected, setSelected]   = useState(null);
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [imageLoading, setImageLoading]   = useState(false);
   const [filter, setFilter]       = useState('전체');
   const [deletingId, setDeletingId] = useState(null);
 
@@ -20,6 +22,19 @@ const ScanLogPage = () => {
   };
 
   useEffect(load, []);
+
+  // 목록엔 용량 문제로 image_data가 없어서(has_image만 있음), 로그를 선택할 때 그 한 건의
+  // 이미지만 별도 엔드포인트로 가져온다.
+  useEffect(() => {
+    setSelectedImage(null);
+    if (!selected?.has_image) return;
+    setImageLoading(true);
+    fetch(`/api/admin/scan-logs/${selected.id}/image`, { credentials: 'include' })
+      .then(r => r.json())
+      .then(d => setSelectedImage(d.image_data || null))
+      .catch(() => setSelectedImage(null))
+      .finally(() => setImageLoading(false));
+  }, [selected?.id]);
 
   const handleDelete = async (id) => {
     if (!window.confirm('이 스캔 로그를 삭제하시겠습니까?')) return;
@@ -90,13 +105,10 @@ const ScanLogPage = () => {
                 <div key={log.id} role="button" tabIndex={0} onClick={() => setSelected(selected?.id === log.id ? null : log)}
                   className={`w-full flex items-center gap-3 px-4 py-3.5 border-b border-gray-50 transition-colors text-left cursor-pointer group
                     ${selected?.id === log.id ? 'bg-blue-50/40' : 'hover:bg-gray-50'}`}>
-                  {/* 썸네일 */}
+                  {/* 썸네일 - 목록에서는 용량 문제로 실제 이미지를 안 불러오고 아이콘만 표시,
+                      실제 사진은 상세 패널에서 선택 시 개별 조회 */}
                   <div className="w-12 h-12 rounded-xl overflow-hidden bg-gray-100 shrink-0 flex items-center justify-center">
-                    {log.image_data
-                      ? <img src={log.image_data.startsWith('data:') ? log.image_data : `data:image/jpeg;base64,${log.image_data}`}
-                          alt="scan" className="w-full h-full object-cover" />
-                      : <span className="text-xl">{log.mode === 'food' ? '🥦' : '🧾'}</span>
-                    }
+                    <span className="text-xl">{log.mode === 'food' ? '🥦' : '🧾'}</span>
                   </div>
 
                   {/* 정보 */}
@@ -152,12 +164,14 @@ const ScanLogPage = () => {
             </div>
 
             <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-              {/* 이미지 */}
+              {/* 이미지 - 목록 응답엔 없어서 선택 시 개별 조회한 selectedImage를 사용 */}
               <div className="w-full aspect-square rounded-2xl overflow-hidden bg-gray-100 flex items-center justify-center">
-                {selected.image_data
-                  ? <img src={selected.image_data.startsWith('data:') ? selected.image_data : `data:image/jpeg;base64,${selected.image_data}`}
-                      alt="scan" className="w-full h-full object-cover" />
-                  : <span className="text-4xl">{selected.mode === 'food' ? '🥦' : '🧾'}</span>
+                {imageLoading
+                  ? <RefreshCw size={20} className="text-gray-300 animate-spin" />
+                  : selectedImage
+                    ? <img src={selectedImage.startsWith('data:') ? selectedImage : `data:image/jpeg;base64,${selectedImage}`}
+                        alt="scan" className="w-full h-full object-cover" />
+                    : <span className="text-4xl">{selected.mode === 'food' ? '🥦' : '🧾'}</span>
                 }
               </div>
 
