@@ -168,11 +168,8 @@ function App() {
         </div>
         <h1 className="text-2xl font-black mb-10">SmartPantry</h1>
         <div className="w-full flex flex-col items-center gap-3">
-          {/* 소셜 로그인 - 시연용 간단 로그인으로 대체, 재활성화 시 주석 해제
           <a href="/auth/kakao" className="w-full max-w-[280px] bg-[#FEE500] text-[#3c1e1e] py-4 rounded-2xl font-bold text-center">카카오 로그인</a>
           <a href="/auth/google" className="w-full max-w-[280px] bg-white text-gray-700 py-4 rounded-2xl font-bold text-center border shadow-sm">Google 로그인</a>
-          */}
-          <a href="/auth/demo-login" className="w-full max-w-[280px] bg-black text-white py-4 rounded-2xl font-bold text-center">로그인</a>
         </div>
       </div>
     );
