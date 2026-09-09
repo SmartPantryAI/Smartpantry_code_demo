@@ -29,8 +29,8 @@ except Exception as _rag_a_err:
     def lookup_product(*args, **kwargs):
         return None
 
-OLLAMA_URL = os.getenv("OLLAMA_URL", "https://code.aikopo.net")
-MODEL      = os.getenv("OLLAMA_MODEL", "qwen3-27b")
+OLLAMA_URL = os.getenv("OLLAMA_URL", "https://gemma.aikopo.net")
+MODEL      = os.getenv("OLLAMA_MODEL", "gemma4-e4b")
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
 
 VALID_STORAGE = {"냉장", "냉동", "실온"}
@@ -342,6 +342,75 @@ def resolve_package_unit(name: str, qty, unit) -> tuple[float, str | None, str]:
     return qty, resolved_unit, cleaned_name
 
 
+# ══════════════════════════════════════════════════════════════
+# 낱개 용량(ml) → 총 부피 환산 여부 판단
+#
+# 참기름·간장 같은 "조리용 액체"는 레시피에서 ml/스푼으로 차감되므로
+# 낱개 용량 × 개수를 총 부피(ml)로 환산해 저장한다.
+# 반면 바나나우유·요구르트처럼 "한 번에 마시는 완제품"은 레시피 재료로
+# 쓰일 일이 없고, 240ml×2=480ml 같은 값은 오히려 사용자를 헷갈리게 한다.
+# → 이런 품목은 부피 환산을 건너뛰고 개수(개)로 기록한다.
+# ══════════════════════════════════════════════════════════════
+
+# 낱개 용량이 작아도(1회분이어도) 무조건 ml/g로 환산하는 조리용 액체 키워드.
+_FORCE_VOLUME_LIQUIDS = (
+    "참기름", "들기름", "식용유", "올리브유", "포도씨유", "카놀라유", "해바라기씨유",
+    "간장", "국간장", "진간장", "맛간장", "양조간장", "조선간장",
+    "식초", "사과식초", "현미식초", "발사믹",
+    "맛술", "미림", "미향", "청주", "정종",
+    "액젓", "까나리액젓", "멸치액젓", "피시소스",
+    "소스", "시럽", "올리고당", "물엿", "조청", "매실청", "레몬즙", "생강즙",
+)
+
+# 낱개 용량과 무관하게 "완제품 1개"로 취급하는 단품 음료 키워드.
+_CONSUME_AS_UNIT = (
+    "바나나우유", "바나나맛우유", "초코우유", "초콜릿우유", "딸기우유", "커피우유",
+    "가공유", "요구르트", "요플레", "요거트", "액티비아",
+    "박카스", "비타500", "비타1000", "핫식스", "레드불", "몬스터", "포카리", "게토레이",
+    "캔커피", "레쓰비", "티오피", "칸타타", "조지아",
+    "식혜", "수정과", "아침햇살", "쌕쌕", "봉봉",
+)
+
+# 이 값 이하의 낱개 용량(ml)은 "1회 음용분"으로 보고 개수로 기록한다.
+_SINGLE_SERVE_ML = 500
+
+
+def resolve_receipt_volume(name: str, unit_weight, purchase_qty: float,
+                           unit: str | None) -> tuple[float, str | None]:
+    """
+    영수증의 낱개 용량/구매 개수를 펜트리 저장값(qty, unit)으로 환산한다.
+
+    - 조리용 액체(_FORCE_VOLUME_LIQUIDS): 낱개 용량 × 개수 → 총 부피(ml/g)
+    - 단품 음료(_CONSUME_AS_UNIT) 또는 낱개 용량이 1회분(_SINGLE_SERVE_ML) 이하인
+      ml 품목: 부피 환산을 건너뛰고 개수(개)로 기록
+    - 낱개 용량/단위 정보가 없으면: 개수 그대로, unit은 None(프런트에서 사용자 선택)
+    """
+    if unit_weight is None or unit not in ("g", "ml"):
+        return purchase_qty, None
+
+    try:
+        uw = float(unit_weight)
+    except (TypeError, ValueError):
+        return purchase_qty, None
+
+    base = name.split("(")[0]
+    matches = lambda kws: any(kw in base or kw in name for kw in kws)
+
+    # 1) 조리용 액체는 용량이 작아도 무조건 부피 환산
+    if matches(_FORCE_VOLUME_LIQUIDS):
+        return uw * purchase_qty, unit
+
+    # 2) 단품 음료는 용량과 무관하게 개수
+    if unit == "ml" and matches(_CONSUME_AS_UNIT):
+        return purchase_qty, "개"
+
+    # 3) 낱개 용량이 1회 음용분 수준인 ml 품목도 개수로
+    if unit == "ml" and uw <= _SINGLE_SERVE_ML:
+        return purchase_qty, "개"
+
+    return uw * purchase_qty, unit
+
+
 def is_valid_date(s: str) -> bool:
     if not DATE_RE.match(s):
         return False
@@ -484,11 +553,12 @@ def fix_exif_rotation(img_path: str) -> np.ndarray:
 
 
 def encode_image(img: np.ndarray, max_width: int = 1000, max_b64_bytes: int = 900_000) -> str:
-    # code.aikopo.net(vLLM 게이트웨이)의 요청 본문 제한이 약 1MB(1024KB에서 즉시 413, 1000KB는 통과)라,
-    # 실제 폰 카메라 사진(예: 3060x4080)을 base64 인코딩하면 이 한도를 넘어 413으로 거부되고
-    # stream_llm이 빈 문자열을 반환해 "0개 인식"으로 조용히 실패하는 문제가 실사용 중 확인됐다.
-    # 품질을 낮춰도 부족하면 해상도까지 단계적으로 줄여서 항상 한도 아래로 맞춘다(프롬프트 텍스트
-    # 오버헤드를 감안해 base64 900KB를 목표로 잡아 1MB 한도에 여유를 둔다).
+    # 예전 게이트웨이(code.aikopo.net)의 요청 본문 제한이 약 1MB(1024KB에서 즉시 413, 1000KB는
+    # 통과)였어서, 실제 폰 카메라 사진(예: 3060x4080)을 base64 인코딩하면 이 한도를 넘어 413으로
+    # 거부되고 stream_llm이 빈 문자열을 반환해 "0개 인식"으로 조용히 실패하는 문제가 실사용 중
+    # 확인됐다. 현재 게이트웨이(gemma.aikopo.net)는 더 넉넉하지만(1200KB에서도 413 없음 확인),
+    # 안전 마진 삼아 그대로 유지한다. 품질을 낮춰도 부족하면 해상도까지 단계적으로 줄여서 항상
+    # 한도 아래로 맞춘다(프롬프트 텍스트 오버헤드를 감안해 base64 900KB를 목표로 잡는다).
     h, w = img.shape[:2]
     if w > max_width:
         scale = max_width / w
@@ -669,7 +739,8 @@ def pass2_normalize(purchase_date: str, raw_items: list, fallback_date: str) -> 
 
     payload = {
         "model": MODEL,
-        "chat_template_kwargs": {"enable_thinking": False},
+        # chat_template_kwargs.enable_thinking은 Qwen3 전용 - gemma4-e4b는 이 개념이 없고
+        # response_format:json_object만으로 이미 깨끗한 JSON을 낸다(reasoning 서술 없음).
         "messages": [
             {"role": "system", "content": _PASS2_PROMPT.format(items_json=items_json)},
             {"role": "user", "content": "위 상품 목록을 정규화해줘."}

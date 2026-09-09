@@ -7,7 +7,7 @@
 import mysql from 'mysql2/promise';
 
 const BASE_URL = 'https://www.themealdb.com/api/json/v1/1';
-const OLLAMA_URL = 'http://ollama.aikopo.net/api/chat';
+const OLLAMA_URL = 'https://gemma.aikopo.net/v1/chat/completions';
 const TRANSLATE_TIMEOUT_MS = 30000;
 
 // TheMealDB strCategory 중 메인요리로 보지 않는 카테고리 (server.js buildRecipeCandidates의
@@ -35,7 +35,7 @@ const lookupMeal = async (idMeal) => {
   return data?.meals?.[0] || null;
 };
 
-// classifyCanonicalIngredient/polishRecipesWithLLM과 동일한 gemma4:26b 호출 패턴.
+// classifyCanonicalIngredient/polishRecipesWithLLM과 동일한 gemma4-e4b(vLLM, OpenAI 호환) 호출 패턴.
 // 레시피당 1회, 제목+조리법+재료명+분량 전체를 한 번에 번역 요청한다.
 const translateMealDbRecipe = async (meal) => {
   const ingredientPairs = [];
@@ -59,17 +59,19 @@ const translateMealDbRecipe = async (meal) => {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: 'gemma4:26b',
+      model: 'gemma4-e4b',
       messages: [{ role: 'user', content: prompt }],
       stream: false,
-      think: false,
-      options: { temperature: 0.2, num_predict: 2000 },
+      temperature: 0.2,
+      max_tokens: 2000,
+      response_format: { type: 'json_object' },
     }),
     signal: AbortSignal.timeout(TRANSLATE_TIMEOUT_MS),
   });
   const data = await res.json();
-  // gemma4:26b가 "JSON만 출력하라" 지시에도 ```json 코드펜스로 감싸는 경우가 실측 확인됨 - 벗겨내고 파싱한다.
-  const raw = (data?.message?.content || '{}').trim();
+  // response_format:json_object로도 혹시 코드펜스가 섞여 나올 경우를 대비한 방어적 처리(다른
+  // 호출부와 동일 패턴).
+  const raw = (data?.choices?.[0]?.message?.content || '{}').trim();
   const fenceStripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
   const parsed = JSON.parse(fenceStripped);
   if (!parsed.title || !parsed.instructions || !Array.isArray(parsed.ingredients)) {

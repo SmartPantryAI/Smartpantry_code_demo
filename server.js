@@ -285,12 +285,15 @@ const FOOD_CATEGORIES = [
 const guessCategory = async (name) => {
   if (!name) return null;
   try {
-    const { data } = await axios.post('http://code.aikopo.net/v1/chat/completions', {
-      model: 'qwen3-27b',
+    // gemma4-e4b는 일반 텍스트 답변 요청 시 "생각 과정" 서술을 먼저 붙이는 경향이 있어(실측 확인:
+    // max_tokens 안에 실제 답이 아예 안 들어옴), response_format:json_object로 강제해야 깨끗한
+    // 답만 나온다(카테고리명만 요구하는 plain-text 프롬프트로는 항상 잘림).
+    const { data } = await axios.post('https://gemma.aikopo.net/v1/chat/completions', {
+      model: 'gemma4-e4b',
       messages: [
         {
           role: 'system',
-          content: `너는 식재료 분류 AI다. 주어진 식재료 이름이 아래 11개 카테고리 중 어디에 속하는지 카테고리명만 출력한다. 다른 텍스트는 절대 출력하지 않는다.
+          content: `너는 식재료 분류 AI다. 주어진 식재료 이름이 아래 11개 카테고리 중 어디에 속하는지 판단해서 JSON으로만 출력한다: {"category": "카테고리명"}. 다른 텍스트는 절대 출력하지 않는다.
 
 카테고리:
 - 채소류: 당근, 양파, 배추, 가지, 파프리카, 버섯, 콩나물 등 신선 채소
@@ -309,11 +312,13 @@ const guessCategory = async (name) => {
       ],
       stream: false,
       temperature: 0,
-      max_tokens: 20,
-      chat_template_kwargs: { enable_thinking: false },
+      max_tokens: 50,
+      response_format: { type: 'json_object' },
     }, { timeout: 30000 });
 
-    const result = (data?.choices?.[0]?.message?.content || '').trim();
+    const raw = (data?.choices?.[0]?.message?.content || '').trim();
+    let result = '';
+    try { result = JSON.parse(raw).category || ''; } catch { result = raw; }
     const matched = FOOD_CATEGORIES.find(cat => result.includes(cat));
     return matched || null;
   } catch (err) {
@@ -337,22 +342,25 @@ const classifyCanonicalIngredient = async (itemName) => {
   if (directMatch.length > 0) return null;
 
   try {
-    const { data } = await axios.post('http://code.aikopo.net/v1/chat/completions', {
-      model: 'qwen3-27b',
+    // guessCategory와 동일한 이유로 response_format:json_object 강제 필요(gemma4-e4b).
+    const { data } = await axios.post('https://gemma.aikopo.net/v1/chat/completions', {
+      model: 'gemma4-e4b',
       messages: [
         {
           role: 'system',
-          content: '너는 식재료 변환 AI다. 주어진 식료품 상품명이 조리 레시피에서 흔히 쓰이는 표준 재료명으로 변환 가능하면 그 표준 재료명 한 단어만 출력한다(예: 햇반→쌀, 스팸→돼지고기). 이미 표준 재료명이거나 변환할 명확한 재료가 없으면 NONE이라고만 출력한다. 다른 텍스트는 절대 출력하지 않는다.',
+          content: '너는 식재료 변환 AI다. 주어진 식료품 상품명이 조리 레시피에서 흔히 쓰이는 표준 재료명으로 변환 가능하면 JSON으로 출력한다: {"canonical": "표준재료명"}(예: 햇반→{"canonical":"쌀"}, 스팸→{"canonical":"돼지고기"}). 이미 표준 재료명이거나 변환할 명확한 재료가 없으면 {"canonical": null}로 출력한다. 다른 텍스트는 절대 출력하지 않는다.',
         },
         { role: 'user', content: itemName },
       ],
       stream: false,
       temperature: 0,
-      max_tokens: 20,
-      chat_template_kwargs: { enable_thinking: false },
+      max_tokens: 50,
+      response_format: { type: 'json_object' },
     }, { timeout: 30000 });
 
-    const canonical = (data?.choices?.[0]?.message?.content || '').trim();
+    const raw = (data?.choices?.[0]?.message?.content || '').trim();
+    let canonical = null;
+    try { canonical = JSON.parse(raw).canonical || null; } catch { canonical = null; }
     if (canonical && canonical !== 'NONE' && canonical !== itemName) {
       await query(
         `INSERT INTO ingredient_aliases (alias_name, canonical_ingredient, source) VALUES (?, ?, 'llm')
@@ -528,22 +536,22 @@ app.post('/api/scan', isLoggedIn, async (req, res) => {
 });
 
 // ── 레시피 추천 (DB 커버리지 매칭 → 상위 후보만 LLM으로 서술 다듬기) ──────
-// LLM 서빙이 Ollama에서 vLLM(OpenAI 호환 API)으로 바뀌었다 - 엔드포인트는 /v1/chat/completions,
-// 응답은 choices[0].message.content 형태다(Ollama의 message.content와 다름). 이 함수를 호출하는
-// polishRecipesWithLLM/generateLLMRecipe의 payload도 Ollama 전용 필드(think, options.num_predict)
-// 대신 top-level temperature/max_tokens + chat_template_kwargs.enable_thinking(Qwen3 reasoning
-// 끄기, Ollama의 think:false에 대응)를 쓰도록 맞춰야 한다.
+// 서비스 전체 LLM: gemma4-e4b @ gemma.aikopo.net(OpenAI 호환 /v1/chat/completions) -
+// guessCategory/classifyCanonicalIngredient도 이 모델로 통일됐다. qwen3-27b(code.aikopo.net)보다
+// 훨씬 빨라서(실측: 레시피 폴리시 8초대/자유생성 23초대, 기존 27초/40초 대비) 전환했다.
+// Gemma는 Qwen3의 chat_template_kwargs.enable_thinking 개념이 없고, 오히려 일반 텍스트 응답에서
+// "생각 과정"을 먼저 서술하는 경향이 강해(실측: 카테고리명만 요구해도 답 전에 긴 사고 서술이
+// 붙어 max_tokens 안에 실제 답이 안 들어옴) response_format:json_object로 강제해야 한다 -
+// guessCategory/classifyCanonicalIngredient도 이 이유로 프롬프트를 JSON 스키마로 바꿨다.
 // 응답이 간헐적으로 타임아웃/네트워크 오류를 내므로 1회 재시도한다.
-// 타임아웃은 60초 - vLLM(qwen3-27b) 전환 후 실측해보니 정상 응답도 폴리시 27초/자유생성 40초
-// 정도 걸려서(기존 Ollama+gemma4:26b보다 느림), 예전에 "서버 다운 시 빨리 포기"용으로 잡았던
-// 15초는 정상적으로 느린 응답까지 실패로 처리해버리는 역효과가 있었다. 반대로 서버가 완전히
-// 다운된 경우(Cloudflare 502 등)는 응답 자체가 즉시(1초 이내) 에러로 오므로 타임아웃 값을 늘려도
-// "다운 시 오래 기다리는" 문제는 생기지 않는다 - 타임아웃은 오직 "응답이 아예 안 오는" 경우에만
-// 개입한다. polishRecipesWithLLM/generateLLMRecipe가 Promise.all로 병렬 실행되므로 전체
-// 대기시간은 둘 중 느린 쪽(약 40초) 수준이고, nginx proxy_read_timeout(130초)보다 여유있게 짧다.
+// 타임아웃은 60초로 유지 - 서버가 완전히 다운된 경우(Cloudflare 502 등)는 응답 자체가 즉시(1초
+// 이내) 에러로 오므로 타임아웃 값을 넉넉히 잡아도 "다운 시 오래 기다리는" 문제는 생기지 않는다
+// (타임아웃은 오직 "응답이 아예 안 오는" 경우에만 개입). polishRecipesWithLLM/generateLLMRecipe가
+// Promise.all로 병렬 실행되므로 전체 대기시간은 둘 중 느린 쪽 수준이고, nginx
+// proxy_read_timeout(130초)보다 여유있게 짧다.
 async function callOllamaWithRetry(payload, retries = 1) {
     try {
-        return await axios.post('http://code.aikopo.net/v1/chat/completions', payload, { timeout: 60000 });
+        return await axios.post('https://gemma.aikopo.net/v1/chat/completions', payload, { timeout: 60000 });
     } catch (err) {
         if (retries > 0) {
             console.warn('⚠️ Ollama 호출 실패, 재시도:', err.message);
@@ -634,6 +642,21 @@ const isUniversalStaple = (ingredientName) => UNIVERSAL_STAPLE_INGREDIENTS.some(
 // 피한다 - 실측 결과 gap<=1에서 전원 7건 이상, gap<=2에서 전원 20건 이상 확보됐다.
 const COST_GAP_TIERS = [0, 1, 2, 3, 5];
 const MIN_ACCEPTABLE_POOL = 10;
+const MAX_MISSING_REQUIRED = 3;
+
+// TheMealDB strCategory 중 "이 카테고리면 이 단백질이 요리의 핵심"이라고 볼 수 있는 것만 매핑한다
+// (Vegetarian/Vegan/Pasta처럼 특정 단백질을 가리키지 않는 카테고리는 제외 - 판정 불가).
+// 제목에 재료명이 텍스트로 안 들어간 해외 레시피(로티 존 등 음역명)는 titleIngredient 필터로
+// 못 잡히므로, 원본 카테고리를 보강 신호로 쓴다 - 카테고리가 가리키는 단백질이 필수재료로 있는데
+// 그게 전혀 없으면 제외한다(mafra 레시피는 source_category가 NULL이라 적용 대상이 아님).
+const CATEGORY_PROTEIN_KEYWORDS = {
+    Beef: ['소고기', '쇠고기', '한우', '스테이크', '차돌박이', '불고기', '안심', '등심', '양지'],
+    Chicken: ['닭', '치킨'],
+    Pork: ['돼지고기', '삼겹살', '목살', '베이컨', '앞다리살', '항정살', '갈매기살'],
+    Lamb: ['양고기', '램'],
+    Goat: ['염소'],
+    Seafood: ['새우', '오징어', '조개', '생선', '연어', '참치', '게살', '문어', '낙지', '홍합', '굴', '대구', '고등어', '멸치', '전복', '가리비', '광어', '방어', '갑오징어', '해산물'],
+};
 
 // 1단계: SQL/코드 기반 결정론적 커버리지 계산 (LLM 미사용)
 // is_main_dish는 소스 무관(mafra dish_type / TheMealDB strCategory 백필 결과) 공통 컬럼이다.
@@ -641,7 +664,7 @@ const MIN_ACCEPTABLE_POOL = 10;
 const buildRecipeCandidates = async (pantryNames, priorityNames, userId) => {
     const rows = await query(`
         SELECT r.id AS recipe_id, r.title, r.description, r.cooking_time, r.difficulty,
-               ing.name AS ingredient_name, ri.amount, ri.unit, ri.is_required
+               r.source_category, ing.name AS ingredient_name, ri.amount, ri.unit, ri.is_required
         FROM recipes r
         JOIN recipe_ingredients ri ON ri.recipe_id = r.id
         JOIN ingredients ing ON ing.id = ri.ingredient_id
@@ -657,6 +680,7 @@ const buildRecipeCandidates = async (pantryNames, priorityNames, userId) => {
                 description: row.description,
                 cooking_time: row.cooking_time,
                 difficulty: row.difficulty,
+                source_category: row.source_category,
                 ingredients: [],
             });
         }
@@ -676,11 +700,41 @@ const buildRecipeCandidates = async (pantryNames, priorityNames, userId) => {
         const matchedRequired = required.filter(i => isMatchedByPantry(i.name, pantryNames));
         const matchedSeasoning = seasoning.filter(i => isMatchedByPantry(i.name, pantryNames));
 
+        // 레시피 제목에 그대로 들어간 필수재료(예: "비빔냉면"의 "냉면", "카레라이스"의 "카레")는
+        // 그 요리의 정체성 자체라 없으면 만들 수 없다 - 다른 재료를 아무리 많이 보유해도 costGap
+        // 점수로 "상쇄"되면 안 된다(실사용 중 발견: 냉면 없이 양념만 갖춘 비빔냉면이 추천됨).
+        // priorityMatchCount/costGap 하드 필터와 무관하게 항상 적용한다 - 우선순위로 다른 재료를
+        // 골랐다고 해서 "이 요리의 핵심 재료가 없다"는 문제가 해결되지 않는다.
+        const titleIngredient = required.find(i =>
+            i.name.length >= 2 && (recipe.title.includes(i.name) || i.name.includes(recipe.title))
+        );
+        if (titleIngredient && !isMatchedByPantry(titleIngredient.name, pantryNames)) continue;
+
+        // titleIngredient와 같은 취지의 보강 필터 - 제목에 재료명이 텍스트로 안 들어간 해외
+        // 레시피(예: "로티 존"은 "바게트"/"소고기"라는 글자가 제목에 없음)를 위해 원본 카테고리로
+        // 판정한다. 카테고리가 가리키는 단백질 재료가 레시피에 있는데 그게 전혀 없으면 제외.
+        const proteinKeywords = CATEGORY_PROTEIN_KEYWORDS[recipe.source_category];
+        if (proteinKeywords) {
+            const proteinIngredients = required.filter(i => proteinKeywords.some(k => i.name.includes(k)));
+            if (proteinIngredients.length > 0 && !proteinIngredients.some(i => isMatchedByPantry(i.name, pantryNames))) continue;
+        }
+
         const requiredCoverage = required.length ? matchedRequired.length / required.length : 0;
 
         const seasoningCoverage = seasoning.length ? matchedSeasoning.length / seasoning.length : 0;
         const priorityMatchCount = [...matchedRequired, ...matchedSeasoning]
             .filter(i => isMatchedByPantry(i.name, priorityNames)).length;
+
+        // 부족한 필수재료(범용 조미료 제외) 개수에 절대 상한을 둔다 - costGap은 양념 몇 개로
+        // "상쇄"될 수 있어서, 필수재료가 여러 개 통째로 없어도(실사용 중 발견: "로티 존"이
+        // 다진 소고기/양파/바게트/마요네즈 4개가 없는데도 추천됨) 통과하는 문제가 있었다. 제목에
+        // 재료명이 그대로 안 들어간 해외 레시피(TheMealDB, is_required가 전부 1로 저장됨)일수록
+        // 이 문제에 취약해서 titleIngredient 필터만으론 부족하다. 우선순위 매칭 레시피는 예외로
+        // 둔다(costGap과 동일하게, "카레만 있고 나머지는 없는" 의도된 선택을 막지 않기 위해).
+        // 실측: 임계값 3(로티 존은 4개 부족이라 걸러짐)에서도 표본 5명 전원 100건 이상 후보 유지.
+        const nonStapleRequired = required.filter(i => !isUniversalStaple(i.name));
+        const missingRequiredCount = nonStapleRequired.filter(i => !isMatchedByPantry(i.name, pantryNames)).length;
+        if (priorityMatchCount === 0 && missingRequiredCount > MAX_MISSING_REQUIRED) continue;
 
         // costGap = 부족 개수 - 보유 개수 (범용 조미료 제외, 필수+양념 통합). <=0이면 "사야 할 게
         // 이미 가진 것보다 많지 않다"는 뜻. 하드 필터 자체는 루프 밖에서 COST_GAP_TIERS로 단계적으로
@@ -800,7 +854,7 @@ const polishRecipesWithLLM = async (candidates) => {
 
     try {
         const { data } = await callOllamaWithRetry({
-            model: 'qwen3-27b',
+            model: 'gemma4-e4b',
             messages: [
                 { role: 'system', content: RECIPE_POLISH_PROMPT },
                 { role: 'user', content: JSON.stringify(userPayload) },
@@ -808,7 +862,7 @@ const polishRecipesWithLLM = async (candidates) => {
             stream: false,
             temperature: 0.7,
             max_tokens: 3000,
-            chat_template_kwargs: { enable_thinking: false },
+            response_format: { type: 'json_object' },
         });
 
         const text = data?.choices?.[0]?.message?.content || '';
@@ -850,7 +904,7 @@ const RECIPE_GENERATE_PROMPT = `너는 요리 레시피 생성 보조 AI다. 한
 const generateLLMRecipe = async (pantryNames, priorityNames = []) => {
     try {
         const { data } = await callOllamaWithRetry({
-            model: 'qwen3-27b',
+            model: 'gemma4-e4b',
             messages: [
                 { role: 'system', content: RECIPE_GENERATE_PROMPT },
                 { role: 'user', content: JSON.stringify({ have: pantryNames, priority: priorityNames }) },
@@ -858,7 +912,7 @@ const generateLLMRecipe = async (pantryNames, priorityNames = []) => {
             stream: false,
             temperature: 0.7,
             max_tokens: 1500,
-            chat_template_kwargs: { enable_thinking: false },
+            response_format: { type: 'json_object' },
         });
         const text = data?.choices?.[0]?.message?.content || '';
         const parsed = JSON.parse(text);
@@ -1436,18 +1490,21 @@ const sendExpiryPushNotifications = async () => {
 cron.schedule('0 7 * * *',  () => sendExpiryPushNotifications(), { timezone: 'Asia/Seoul' });
 cron.schedule('30 17 * * *', () => sendExpiryPushNotifications(), { timezone: 'Asia/Seoul' });
 
-// ── 크론잡: 매일 자정, 전시 데모 계정 초기화 ──────────────────────
-// users 행을 지우면 pantry/scan_logs/saved_recipes 등 관련 데이터가 ON DELETE CASCADE로 전부 함께 삭제됨.
-// 다음 /auth/demo-login 요청이 오면 find-or-create 로직이 새 계정을 만들어주므로 별도 재생성 로직은 불필요.
-const resetDemoAccount = async () => {
+// ── 크론잡: 매일 자정, 전시 데모 계정의 식재료(pantry)만 초기화 ──────
+// 계정 자체는 유지한다 - 계정을 지우면 약관 동의(is_agreed)가 초기화돼 재동의 화면이 뜨고,
+// 자정을 걸쳐 켜져 있던 세션은 끊긴다. 목적(며칠 지난 식재료 정리)엔 pantry만 비우면 충분하다.
+const resetDemoPantry = async () => {
     try {
-        const result = await query('DELETE FROM users WHERE email = ?', [DEMO_USER_EMAIL]);
-        console.log(`🔄 데모 계정 초기화 완료 (affected: ${result.affectedRows})`);
+        const result = await query(
+            'DELETE FROM pantry WHERE user_id = (SELECT id FROM users WHERE email = ?)',
+            [DEMO_USER_EMAIL]
+        );
+        console.log(`🔄 데모 계정 식재료 초기화 완료 (affected: ${result.affectedRows})`);
     } catch (err) {
-        console.error('데모 계정 초기화 실패:', err.message);
+        console.error('데모 식재료 초기화 실패:', err.message);
     }
 };
-cron.schedule('0 0 * * *', resetDemoAccount, { timezone: 'Asia/Seoul' });
+cron.schedule('0 0 * * *', resetDemoPantry, { timezone: 'Asia/Seoul' });
 
 // ── 관리자: 유통기한 알림 수동 테스트 발송 ───────────────────────
 app.post('/api/admin/push-test-expiry', isAdminConsole, async (req, res) => {

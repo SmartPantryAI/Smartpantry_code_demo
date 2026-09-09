@@ -17,8 +17,8 @@ except ImportError:
 
 from pipeline_common import calculate_use_by, resolve_package_unit
 
-OLLAMA_URL = "https://code.aikopo.net"
-MODEL = "qwen3-27b"
+OLLAMA_URL = "https://gemma.aikopo.net"
+MODEL = "gemma4-e4b"
 
 VALID_STORAGE = {"냉장", "냉동", "실온"}
 VALID_CATEGORIES = {
@@ -50,9 +50,10 @@ def fix_exif_rotation(img_path: str) -> np.ndarray:
 
 
 def encode_image(img: np.ndarray, max_width: int = 1500, max_b64_bytes: int = 900_000) -> str:
-    # code.aikopo.net(vLLM 게이트웨이)의 요청 본문 제한이 약 1MB라, 고해상도 사진을 base64
-    # 인코딩하면 이 한도를 넘어 413으로 거부되고 "0개 인식"으로 조용히 실패하는 문제가 있다
+    # 예전 게이트웨이(code.aikopo.net)의 요청 본문 제한이 약 1MB였어서, 고해상도 사진을 base64
+    # 인코딩하면 이 한도를 넘어 413으로 거부되고 "0개 인식"으로 조용히 실패하는 문제가 있었다
     # (pipeline_common.py의 encode_image와 동일한 원인/해결책 - receipt_pipeline.py에서 확인됨).
+    # 현재 게이트웨이(gemma.aikopo.net)는 더 넉넉하지만, 안전 마진 삼아 그대로 유지한다 -
     # 품질을 낮춰도 부족하면 해상도까지 단계적으로 줄여서 항상 한도 아래로 맞춘다.
     h, w = img.shape[:2]
     if w > max_width:
@@ -249,9 +250,8 @@ def process_food_llm(img_path: str) -> dict:
 
     payload = {
         "model": MODEL,
-        # think(Ollama) → chat_template_kwargs.enable_thinking(vLLM/Qwen3) - reasoning 텍스트가
-        # content에 섞여 나오는 것을 막는다.
-        "chat_template_kwargs": {"enable_thinking": False},
+        # chat_template_kwargs.enable_thinking은 Qwen3 전용 - gemma4-e4b는 response_format:
+        # json_object만으로 이미 깨끗한 JSON을 낸다(vision 포함, reasoning 서술 안 섞임).
         "messages": [
             {"role": "system", "content": build_food_prompt()},
             {

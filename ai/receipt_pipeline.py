@@ -4,7 +4,8 @@ from datetime import date
 
 from pipeline_common import (
     MODEL, encode_image, fix_exif_rotation, VALID_UNITS,
-    is_valid_date, parse_llm_json, stream_llm, pass2_normalize
+    is_valid_date, parse_llm_json, stream_llm, pass2_normalize,
+    resolve_receipt_volume
 )
 
 """
@@ -287,7 +288,8 @@ def _pass1_ocr(img: np.ndarray, fallback_date: str) -> dict:
 
     payload = {
         "model": MODEL,
-        "chat_template_kwargs": {"enable_thinking": False},
+        # chat_template_kwargs.enable_thinking은 Qwen3 전용 - gemma4-e4b는 response_format:
+        # json_object만으로 이미 깨끗한 JSON을 낸다(vision 포함).
         "messages": [
             {"role": "system", "content": PASS1_PROMPT},
             {
@@ -332,14 +334,8 @@ def _pass1_ocr(img: np.ndarray, fallback_date: str) -> dict:
         unit_weight  = it.get("unit_weight")       # 낱개 1개당 무게/부피 (없으면 None)
 
         # 곱셈은 LLM한테 맡기지 않고 여기서 파이썬으로 확정적으로 계산한다.
-        if unit_weight is not None and unit in ("g", "ml"):
-            try:
-                final_qty = float(unit_weight) * purchase_qty
-            except (TypeError, ValueError):
-                final_qty = purchase_qty
-        else:
-            final_qty = purchase_qty
-            unit = None
+        # 단, 바나나우유처럼 "한 번에 마시는 단품 음료"는 부피(480ml) 대신 개수(2개)로 기록한다.
+        final_qty, unit = resolve_receipt_volume(name, unit_weight, purchase_qty, unit)
 
         items.append({
             "name": name,

@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS recipes (
     is_main_dish TINYINT(1), -- 소스 무관 메인요리 판정(1=메인, 0=디저트/사이드 등) - buildRecipeCandidates 필터링에 사용
     source_api   VARCHAR(20) NOT NULL DEFAULT 'mafra', -- 'mafra' | 'themealdb'
     external_id  VARCHAR(50) NULL, -- 외부 API 원본 id (mafra 데이터는 NULL) - 재실행 시 중복 import 방지
+    source_category VARCHAR(50) NULL, -- TheMealDB strCategory 원문(예: 'Beef','Seafood') - mafra는 NULL.
+                                       -- buildRecipeCandidates에서 "카테고리가 특정 단백질을 가리키는데
+                                       -- 그 재료가 아예 없으면 제외" 판정에 쓰인다(제목에 재료명이
+                                       -- 텍스트로 안 들어간 해외 레시피용 보강 신호).
     created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_recipes_source (source_api, external_id)
 );
