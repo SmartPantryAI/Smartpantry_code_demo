@@ -734,29 +734,85 @@ JSON만 출력.
 """
 
 
+# 같은 영수증 품목(name/qty/unit이 완전히 동일)은 재구매 시 그대로 다시 찍히는 경우가 많다.
+# temperature=0이라 같은 입력이면 LLM도 이전과 같은 결과를 낼 뿐이므로, 정확도 손실 없이
+# 이미 정규화한 품목은 캐시로 재사용하고 처음 보는 품목만 LLM에 보내 생성량/왕복을 줄인다.
+_PASS2_CACHE_PATH = os.path.join(os.path.dirname(__file__), "pass2_item_cache.json")
+
+
+def _load_pass2_cache() -> dict:
+    try:
+        with open(_PASS2_CACHE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+_pass2_cache = _load_pass2_cache()
+
+
+def _pass2_cache_key(raw_item: dict) -> str:
+    return json.dumps(raw_item, ensure_ascii=False, sort_keys=True)
+
+
+def _save_pass2_cache():
+    try:
+        with open(_PASS2_CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(_pass2_cache, f, ensure_ascii=False)
+    except OSError as e:
+        print(f"[pass2 캐시 저장 실패] {e}")
+
+
 def pass2_normalize(purchase_date: str, raw_items: list, fallback_date: str) -> list:
-    items_json = json.dumps(raw_items, ensure_ascii=False, indent=2)
+    keys   = [_pass2_cache_key(it) for it in raw_items]
+    misses = [it for it, k in zip(raw_items, keys) if k not in _pass2_cache]
 
-    payload = {
-        "model": MODEL,
-        # chat_template_kwargs.enable_thinking은 Qwen3 전용 - gemma4-e4b는 이 개념이 없고
-        # response_format:json_object만으로 이미 깨끗한 JSON을 낸다(reasoning 서술 없음).
-        "messages": [
-            {"role": "system", "content": _PASS2_PROMPT.format(items_json=items_json)},
-            {"role": "user", "content": "위 상품 목록을 정규화해줘."}
-        ],
-        "response_format": {"type": "json_object"},
-        "stream": True,
-        "temperature": 0,
-        "max_tokens": 2048,
-    }
+    llm_out_items = []
+    if misses:
+        items_json = json.dumps(misses, ensure_ascii=False, indent=2)
 
-    raw_text = stream_llm(payload)
-    result = parse_llm_json(raw_text)
+        payload = {
+            "model": MODEL,
+            # chat_template_kwargs.enable_thinking은 Qwen3 전용 - gemma4-e4b는 이 개념이 없고
+            # response_format:json_object만으로 이미 깨끗한 JSON을 낸다(reasoning 서술 없음).
+            "messages": [
+                {"role": "system", "content": _PASS2_PROMPT.format(items_json=items_json)},
+                {"role": "user", "content": "위 상품 목록을 정규화해줘."}
+            ],
+            "response_format": {"type": "json_object"},
+            "stream": True,
+            "temperature": 0,
+            "max_tokens": 2048,
+        }
+
+        raw_text = stream_llm(payload)
+        llm_out_items = parse_llm_json(raw_text).get("items", [])
+
+        # LLM이 개수를 그대로 보존했을 때만(입력=출력 1:1 대응이 보장될 때만) 캐시에 저장한다.
+        # 개수가 달라지면(병합/누락) 어떤 출력이 어떤 입력에 대응하는지 알 수 없어, 잘못된
+        # 캐시 항목이 다음 영수증의 정확도를 해칠 수 있으므로 이번 실행 결과만 쓰고 버린다.
+        if len(llm_out_items) == len(misses):
+            for miss_item, out_item in zip(misses, llm_out_items):
+                _pass2_cache[_pass2_cache_key(miss_item)] = out_item
+            _save_pass2_cache()
+
+    # 원래 영수증 순서를 유지하며 캐시 적중 항목과 이번에 새로 받은 항목을 합친다.
+    # (입력=출력 개수가 어긋나 대응 관계를 신뢰할 수 없을 때만 순서 없이 이어붙인다.)
+    if len(llm_out_items) == len(misses):
+        miss_cursor = 0
+        combined_items = []
+        for k in keys:
+            if k in _pass2_cache:
+                combined_items.append(_pass2_cache[k])
+            else:
+                combined_items.append(llm_out_items[miss_cursor])
+                miss_cursor += 1
+    else:
+        combined_items = [_pass2_cache[k] for k in keys if k in _pass2_cache] + llm_out_items
 
     items = []
     seen = set()
-    for it in result.get("items", []):
+    for it in combined_items:
         if isinstance(it, str):
             it = {"name": it, "qty": 1, "storage": "실온"}
         if not isinstance(it, dict):

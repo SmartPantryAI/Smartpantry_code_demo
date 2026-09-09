@@ -39,6 +39,8 @@ services:
       - DB_PASSWORD=1234
       - DB_NAME=smartpantry
       - AI_SERVER_URL=http://ai:8000   # ← AI 서버 주소
+      - OLLAMA_URL=${OLLAMA_URL:-https://gemma.aikopo.net}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4-e4b}
     volumes:
       - .:/app
     restart: always
@@ -63,6 +65,10 @@ services:
       context: ./ai
       dockerfile: Dockerfile.ai
     container_name: smartpantry-ai
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-https://gemma.aikopo.net}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4-e4b}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
     ports:
       - "8000:8000"
     volumes:

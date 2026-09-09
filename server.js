@@ -18,6 +18,11 @@ const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 webpush.setVapidDetails('mailto:sj297916@gmail.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
+// ── LLM 설정 (.env에서 엔드포인트/모델 교체 가능, ai 컨테이너와 동일한 변수명 사용) ──
+const OLLAMA_URL      = process.env.OLLAMA_URL   || 'https://gemma.aikopo.net';
+const OLLAMA_MODEL    = process.env.OLLAMA_MODEL || 'gemma4-e4b';
+const OLLAMA_CHAT_URL = `${OLLAMA_URL}/v1/chat/completions`;
+
 // ── 미들웨어 ──────────────────────────────────────────────────
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
@@ -288,8 +293,8 @@ const guessCategory = async (name) => {
     // gemma4-e4b는 일반 텍스트 답변 요청 시 "생각 과정" 서술을 먼저 붙이는 경향이 있어(실측 확인:
     // max_tokens 안에 실제 답이 아예 안 들어옴), response_format:json_object로 강제해야 깨끗한
     // 답만 나온다(카테고리명만 요구하는 plain-text 프롬프트로는 항상 잘림).
-    const { data } = await axios.post('https://gemma.aikopo.net/v1/chat/completions', {
-      model: 'gemma4-e4b',
+    const { data } = await axios.post(OLLAMA_CHAT_URL, {
+      model: OLLAMA_MODEL,
       messages: [
         {
           role: 'system',
@@ -343,8 +348,8 @@ const classifyCanonicalIngredient = async (itemName) => {
 
   try {
     // guessCategory와 동일한 이유로 response_format:json_object 강제 필요(gemma4-e4b).
-    const { data } = await axios.post('https://gemma.aikopo.net/v1/chat/completions', {
-      model: 'gemma4-e4b',
+    const { data } = await axios.post(OLLAMA_CHAT_URL, {
+      model: OLLAMA_MODEL,
       messages: [
         {
           role: 'system',
@@ -551,7 +556,7 @@ app.post('/api/scan', isLoggedIn, async (req, res) => {
 // proxy_read_timeout(130초)보다 여유있게 짧다.
 async function callOllamaWithRetry(payload, retries = 1) {
     try {
-        return await axios.post('https://gemma.aikopo.net/v1/chat/completions', payload, { timeout: 60000 });
+        return await axios.post(OLLAMA_CHAT_URL, payload, { timeout: 60000 });
     } catch (err) {
         if (retries > 0) {
             console.warn('⚠️ Ollama 호출 실패, 재시도:', err.message);
@@ -570,12 +575,23 @@ const DIFFICULTY_KO = { easy: '쉬움', normal: '보통', hard: '어려움' };
 // (nameMatches가 "쌀".includes("쌀국수")는 false여도 "쌀국수".includes("쌀")은 true라 매칭됨).
 const SUBSTRING_FALSE_POSITIVES = {
     '쌀': ['쌀국수', '쌀가루', '쌀식초', '쌀 식초', '쌀뜨물', '멥쌀가루', '찹쌀가루'],
-    '감자': ['감자 전분', '감자전분', '돼지감자'],
+    '감자': ['감자 전분', '감자전분', '돼지감자', '감자탕용 돼지등뼈'],
     '고구마': ['고구마잎', '고구마줄기'],
     '닭고기': ['닭고기 육수'],
     '멸치': ['멸치액젓', '멸치젓'],
     '새우': ['새우젓', '새우젓국'],
     '오징어': ['갑오징어'],
+    // 실사용 중 발견: 펜트리에 "양파"만 있어도 "양"(양곰탕 등에 쓰이는 소 양)이 필요한
+    // 레시피(예: 곰탕)가 보유 재료로 잘못 표시됐다 - "양파/양배추/양상추/양송이/양념"의 "양"은
+    // "서양(洋)"을 뜻하는 동음이의 접두어라 "양"(소의 위, 羘) 자체와는 무관한 식재료다.
+    '양': ['양파', '양배추', '양상추', '양송이', '양념', '양귀비', '양지머리', '양겨자'],
+    // "김"(마른 김밥용 김) vs "김치" - "치"가 붙는 순간 완전히 다른 식재료가 된다.
+    '김': ['김치'],
+    // "마"(마 뿌리채소) vs "마늘"/"마요네즈" 등 - "마"로 시작하는 흔한 재료들이 우연히 겹친다.
+    '마': ['마늘', '마요네즈', '마스카포네', '마조람', '마지팬', '마카로니', '마사만', '마른'],
+    // ingredient_aliases의 별칭명이 상품 설명형 문구일 때 생기는 문제(위 expandWithAliases
+    // 참고) - "의성마늘 비엔나"→"소시지" 별칭이 펜트리 "마늘" 하나로 우연히 걸렸다.
+    '마늘': ['의성마늘 비엔나'],
 };
 
 const isSubstringFalsePositive = (shortName, longName) => {
@@ -583,12 +599,59 @@ const isSubstringFalsePositive = (shortName, longName) => {
     return badWords ? badWords.some(w => longName.includes(w)) : false;
 };
 
-// pantry/CookModal/pantry-cook에서 쓰는 것과 동일한 양방향 부분 문자열 매칭
+// ── 재료명 유사도 매칭 (좁은 안전망) ────────────────────────────
+// 정확 substring 매칭이 실패했을 때만 시도하는 보강책이다 - 범용으로 항상 유사도부터 보면
+// 오분류가 늘어난다는 건 RAG-A 평가에서 이미 확인된 전례라(범용 override는 정확도를 떨어뜨려
+// 폐기됐다), 여기서도 "정확 매칭 우선, 안 될 때만 좁게 보강"만 한다.
+// RAG-B(ai/rag/store.py)는 음절 2-gram 코사인 유사도를 쓰는데, 그건 식약처 코퍼스처럼 대조군
+// 문서가 길 때 잘 맞는 방식이다. 재료명은 대부분 2~6글자로 짧아서 한 글자 차이(예: 펜트리
+// OCR 오타 "그리요거트" vs 레시피 재료명 "그릭요거트")에도 n-gram 코사인은 유사도가 너무 낮게
+// 나온다(실측: 이 예시 bigram 코사인 0.5). 짧은 문자열의 한두 글자 오타/표기 차이에는 편집거리
+// (Levenshtein) 기반 유사도가 더 적합해서 이걸 쓴다 - 짧은 단어일수록 한 글자 차이가 상대적으로
+// 크게 반영돼 오매칭을 자연스럽게 억제한다(예: 2글자 단어는 1글자만 달라도 유사도 0.5로 떨어져
+// threshold를 못 넘는다 - "양파"/"대파" 같은 실제로 다른 재료끼리 우연히 매칭될 위험이 낮다).
+// threshold(0.7)는 실제 식재료명 표본으로 수동 보정했다 - RAG-A의 score>=0.80 관례를 초안으로
+// 써봤더니 정작 목표 사례(그리요거트/그릭요거트 0.80, 청양고추/청량고추 0.75, 고춧가루/고추가루
+// 0.75)가 전부 threshold 밑으로 떨어져 못 잡혔다. 반면 실제로 다른 재료끼리의 유사도는 짧은
+// 단어일수록 훨씬 낮게 나온다(예: 양파/대파, 참치/꽁치, 부추/상추, 멸치/갈치 전부 0.5 이하;
+// 다진마늘/다진생강, 닭가슴살/닭다리살처럼 4글자 단어가 뒤/가운데만 다른 경우도 0.5) - 0.7이면
+// 오타 사례는 잡고 서로 다른 재료끼리의 오매칭은 전부 걸러낸다. 다만 raga/ragb-eval처럼 정식
+// 평가셋으로 튜닝한 값은 아니라서, 운영 중 오매칭 사례가 나오면 재조정이 필요할 수 있다.
+const NAME_SIMILARITY_THRESHOLD = 0.7;
+
+const levenshteinDistance = (a, b) => {
+    const m = a.length, n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+        for (let j = 1; j <= n; j++) {
+            dp[i][j] = a[i - 1] === b[j - 1]
+                ? dp[i - 1][j - 1]
+                : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+        }
+    }
+    return dp[m][n];
+};
+
+const nameSimilarity = (a, b) => {
+    const maxLen = Math.max(a.length, b.length);
+    if (!maxLen) return 1;
+    // 길이 차이만으로 이미 threshold를 못 넘으면 DP 계산 자체를 생략한다(호출량이 많아 저비용
+    // 최적화가 유효함 - buildRecipeCandidates가 요청 1건당 이 함수를 수십만 번 호출한다).
+    if (1 - Math.abs(a.length - b.length) / maxLen < NAME_SIMILARITY_THRESHOLD) return 0;
+    return 1 - levenshteinDistance(a, b) / maxLen;
+};
+
+// pantry/CookModal/pantry-cook에서 쓰는 것과 동일한 양방향 부분 문자열 매칭 + 유사도 안전망
 const nameMatches = (pantryName, ingredientName) => {
     if (isSubstringFalsePositive(pantryName, ingredientName) || isSubstringFalsePositive(ingredientName, pantryName)) {
         return false;
     }
-    return pantryName.includes(ingredientName) || ingredientName.includes(pantryName);
+    if (pantryName.includes(ingredientName) || ingredientName.includes(pantryName)) return true;
+    return nameSimilarity(pantryName, ingredientName) >= NAME_SIMILARITY_THRESHOLD;
 };
 
 const isMatchedByPantry = (ingredientName, pantryNames) =>
@@ -606,9 +669,18 @@ const expandWithAliases = (names, aliasRows) => {
         // 하나의 alias_name이 여러 표준 재료명에 대응할 수 있다(예: "햇반"은 즉석 조리된 밥이라
         // "밥"이 필요한 레시피와 "쌀"이 필요한 레시피 양쪽에 다 대응돼야 한다) - 첫 매칭 하나만
         // 쓰면 나머지 canonical_ingredient가 무시돼 보유 재료로 안 잡히는 문제가 있었다.
-        const hits = aliasRows.filter(a =>
-            trimmed.includes(a.alias_name) || a.alias_name.includes(trimmed)
-        );
+        // nameMatches와 똑같은 함정이 있다 - 별칭명이 "감자탕용 돼지등뼈"처럼 긴 상품 설명형
+        // 문구면, 그 안에 우연히 들어간 흔한 단어("감자")만으로 전혀 무관한 표준재료
+        // ("돼지등뼈")까지 펜트리에 있는 것처럼 확장돼버린다(실사용 중 발견: 펜트리에 "감자"만
+        // 있어도 LLM에 "돼지등뼈를 갖고 있다"고 전달돼 소시지/돼지등뼈가 들어간 레시피가
+        // "보유 재료"로 잘못 표시됨 - "의성마늘 비엔나"→"소시지"도 동일 패턴). nameMatches와
+        // 동일한 예외 목록(isSubstringFalsePositive)으로 걸러낸다.
+        const hits = aliasRows.filter(a => {
+            if (isSubstringFalsePositive(trimmed, a.alias_name) || isSubstringFalsePositive(a.alias_name, trimmed)) {
+                return false;
+            }
+            return trimmed.includes(a.alias_name) || a.alias_name.includes(trimmed);
+        });
         for (const hit of hits) expanded.add(hit.canonical_ingredient);
     }
     return [...expanded];
@@ -705,8 +777,14 @@ const buildRecipeCandidates = async (pantryNames, priorityNames, userId) => {
         // 점수로 "상쇄"되면 안 된다(실사용 중 발견: 냉면 없이 양념만 갖춘 비빔냉면이 추천됨).
         // priorityMatchCount/costGap 하드 필터와 무관하게 항상 적용한다 - 우선순위로 다른 재료를
         // 골랐다고 해서 "이 요리의 핵심 재료가 없다"는 문제가 해결되지 않는다.
+        // 1글자 재료명은 원칙적으로 제외한다 - "물"처럼 범용이라 아무도 펜트리에 등록 안 하는
+        // 단어가 우연히 제목에 들어간 것만으로 멀쩡한 레시피가 통째로 걸러지는 걸 막기 위해서다.
+        // 다만 "밥"처럼 범용 조미료가 아닌 1글자 단어는 예외로 허용한다 - 그렇지 않으면 "밥"이
+        // 아예 없는데도 "중국식볶음밥"이 추천되는 문제가 생긴다(실사용 중 발견). 범용/희소
+        // 판정은 이미 있는 UNIVERSAL_STAPLE_INGREDIENTS 기준을 그대로 재사용한다.
         const titleIngredient = required.find(i =>
-            i.name.length >= 2 && (recipe.title.includes(i.name) || i.name.includes(recipe.title))
+            (i.name.length >= 2 || !isUniversalStaple(i.name)) &&
+            (recipe.title.includes(i.name) || i.name.includes(recipe.title))
         );
         if (titleIngredient && !isMatchedByPantry(titleIngredient.name, pantryNames)) continue;
 
@@ -854,7 +932,7 @@ const polishRecipesWithLLM = async (candidates) => {
 
     try {
         const { data } = await callOllamaWithRetry({
-            model: 'gemma4-e4b',
+            model: OLLAMA_MODEL,
             messages: [
                 { role: 'system', content: RECIPE_POLISH_PROMPT },
                 { role: 'user', content: JSON.stringify(userPayload) },
@@ -904,7 +982,7 @@ const RECIPE_GENERATE_PROMPT = `너는 요리 레시피 생성 보조 AI다. 한
 const generateLLMRecipe = async (pantryNames, priorityNames = []) => {
     try {
         const { data } = await callOllamaWithRetry({
-            model: 'gemma4-e4b',
+            model: OLLAMA_MODEL,
             messages: [
                 { role: 'system', content: RECIPE_GENERATE_PROMPT },
                 { role: 'user', content: JSON.stringify({ have: pantryNames, priority: priorityNames }) },
@@ -916,6 +994,26 @@ const generateLLMRecipe = async (pantryNames, priorityNames = []) => {
         });
         const text = data?.choices?.[0]?.message?.content || '';
         const parsed = JSON.parse(text);
+
+        // LLM이 자유 생성한 재료는 "펜트리에 실제로 있는지" 검증 없이 스스로 used/missing을
+        // 나눈 것이라 그대로 믿을 수 없다(실사용 중 발견: 펜트리에 소시지가 없는데도
+        // used_ingredients에 넣어서 화면에 "보유 재료"로 체크 표시됨). 데이터셋 경로
+        // (buildRecipeCandidates)와 동일한 매칭 함수로 다시 검증해서, 실제로 안 겹치는
+        // 항목은 missing_ingredients로 재분류한다.
+        const rawUsed = Array.isArray(parsed.used_ingredients) ? parsed.used_ingredients : [];
+        const verifiedUsed = [];
+        const reclassifiedMissing = [];
+        for (const ing of rawUsed) {
+            const name = ing?.name;
+            if (!name) continue;
+            if (isMatchedByPantry(name, pantryNames)) {
+                verifiedUsed.push(ing);
+            } else {
+                reclassifiedMissing.push(`${ing.amount ?? ''}${ing.unit ?? ''} ${name}`.trim());
+            }
+        }
+        const rawMissing = Array.isArray(parsed.missing_ingredients) ? parsed.missing_ingredients : [];
+
         return {
             id: null,
             source: 'llm',
@@ -923,8 +1021,8 @@ const generateLLMRecipe = async (pantryNames, priorityNames = []) => {
             description: '',
             time: '?',
             difficulty: '보통',
-            used_ingredients: Array.isArray(parsed.used_ingredients) ? parsed.used_ingredients : [],
-            missing_ingredients: Array.isArray(parsed.missing_ingredients) ? parsed.missing_ingredients : [],
+            used_ingredients: verifiedUsed,
+            missing_ingredients: [...reclassifiedMissing, ...rawMissing],
             steps: Array.isArray(parsed.steps) ? parsed.steps : [],
             tips: Array.isArray(parsed.tips) ? parsed.tips : [],
             reason: typeof parsed.reason === 'string' ? parsed.reason : '',
@@ -1505,6 +1603,53 @@ const resetDemoPantry = async () => {
     }
 };
 cron.schedule('0 0 * * *', resetDemoPantry, { timezone: 'Asia/Seoul' });
+
+// ── 크론잡: 매일 00:01, 자정에 비운 데모 계정 저장고에 기본 식재료를 재투입 ──
+// 임박 3종 + 여유 7종 - recipe_ingredients 실사용 빈도 상위 재료 위주로 골라서,
+// 데모에서 "저장고 → 레시피 추천"을 눌렀을 때 데이터셋 매칭 레시피가 실제로 나오게 한다.
+// (범용 조미료는 채점에서 이미 보유한 것으로 가정돼 추천 결과에 영향이 없어 제외했다.)
+const DEMO_PANTRY_SEED_ITEMS = [
+    // 임박 (D-3)
+    { name: '돼지고기', emoji: '🐖', foodCategory: '육류',       storage: '냉장', days: 3,  quantity: 300, unit: 'g' },
+    { name: '두부',     emoji: '🧊', foodCategory: '두부·콩류',   storage: '냉장', days: 3,  quantity: 1,   unit: '모' },
+    { name: '새우',     emoji: '🍤', foodCategory: '수산물',     storage: '냉장', days: 3,  quantity: 200, unit: 'g' },
+    // 여유 (D-25)
+    { name: '양파', emoji: '🧅', foodCategory: '채소류',     storage: '실온', days: 25, quantity: 3,   unit: '개' },
+    { name: '마늘', emoji: '📦', foodCategory: '채소류',     storage: '냉장', days: 25, quantity: 1,   unit: '통' },
+    { name: '대파', emoji: '📦', foodCategory: '채소류',     storage: '냉장', days: 25, quantity: 1,   unit: '단' },
+    { name: '당근', emoji: '🥕', foodCategory: '채소류',     storage: '냉장', days: 25, quantity: 2,   unit: '개' },
+    { name: '감자', emoji: '🥔', foodCategory: '채소류',     storage: '실온', days: 25, quantity: 3,   unit: '개' },
+    { name: '달걀', emoji: '🥚', foodCategory: '유제품·계란', storage: '냉장', days: 25, quantity: 10,  unit: '개' },
+    { name: '간장', emoji: '🧂', foodCategory: '양념·소스',   storage: '실온', days: 25, quantity: 500, unit: 'ml' },
+];
+
+const seedDemoPantry = async () => {
+    try {
+        const [demoUser] = await query('SELECT id FROM users WHERE email = ?', [DEMO_USER_EMAIL]);
+        if (!demoUser) return;
+
+        const today = new Date();
+        for (const item of DEMO_PANTRY_SEED_ITEMS) {
+            const expiry = new Date(today);
+            expiry.setDate(expiry.getDate() + item.days);
+            const expiryStr = expiry.toISOString().slice(0, 10);
+
+            // mafra/themealdb 일괄 import된 재료는 category가 NULL인 채로 이미 존재할 수 있다
+            // (INSERT IGNORE는 이 경우 아무것도 안 함) - /api/add-item과 동일하게 NULL이면 채워준다.
+            await query('INSERT IGNORE INTO ingredients (name, emoji, category) VALUES (?, ?, ?)', [item.name, item.emoji, item.foodCategory]);
+            await query('UPDATE ingredients SET category = ? WHERE name = ? AND category IS NULL', [item.foodCategory, item.name]);
+            const [ing] = await query('SELECT id FROM ingredients WHERE name = ?', [item.name]);
+            await query(
+                'INSERT INTO pantry (user_id, ingredient_id, item_name, item_emoji, expiry_date, category, quantity, unit, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                [demoUser.id, ing?.id || null, item.name, item.emoji, expiryStr, item.storage, item.quantity, item.unit, 'manual']
+            );
+        }
+        console.log(`🌱 데모 계정 기본 식재료 ${DEMO_PANTRY_SEED_ITEMS.length}종 재투입 완료`);
+    } catch (err) {
+        console.error('데모 식재료 시드 실패:', err.message);
+    }
+};
+cron.schedule('1 0 * * *', seedDemoPantry, { timezone: 'Asia/Seoul' });
 
 // ── 관리자: 유통기한 알림 수동 테스트 발송 ───────────────────────
 app.post('/api/admin/push-test-expiry', isAdminConsole, async (req, res) => {

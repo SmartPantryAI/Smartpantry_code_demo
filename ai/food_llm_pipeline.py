@@ -15,10 +15,7 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-from pipeline_common import calculate_use_by, resolve_package_unit
-
-OLLAMA_URL = "https://gemma.aikopo.net"
-MODEL = "gemma4-e4b"
+from pipeline_common import calculate_use_by, resolve_package_unit, OLLAMA_URL, MODEL
 
 VALID_STORAGE = {"냉장", "냉동", "실온"}
 VALID_CATEGORIES = {

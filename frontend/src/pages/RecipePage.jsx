@@ -289,9 +289,19 @@ const RecipePage = () => {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
+  // expiry_date는 UTC 자정(...T00:00:00.000Z)으로 내려오는데, 로컬 자정으로만 맞춘 today와
+  // 그대로 빼면 시간대 오프셋만큼 날짜가 밀린다(KST +9시간 → Math.ceil이 하루를 더 얹어서
+  // 실제 D-3인 재료가 D-4로 계산됨 - 그 결과 임박재료 자동선택 <=3 필터를 못 넘는다). expiry도
+  // 로컬 자정으로 맞춰야 순수한 "날짜 차이"만 남는다 - App.jsx/HomePage.jsx의 dDay 계산과 동일한 방식.
+  const daysUntil = (expiryDateStr) => {
+    const expiry = new Date(expiryDateStr);
+    expiry.setHours(0, 0, 0, 0);
+    return Math.ceil((expiry - today) / 86400000);
+  };
+
   const sorted = [...pantryItems].sort((a, b) => {
-    const da = Math.ceil((new Date(a.expiry_date) - today) / 86400000);
-    const db = Math.ceil((new Date(b.expiry_date) - today) / 86400000);
+    const da = daysUntil(a.expiry_date);
+    const db = daysUntil(b.expiry_date);
     return da - db;
   });
 
@@ -313,7 +323,7 @@ const RecipePage = () => {
     if (!pantryLoading && priorityItems === null) {
       const auto = new Set(
         pantryItems
-          .filter(i => Math.ceil((new Date(i.expiry_date) - today) / 86400000) <= 3)
+          .filter(i => daysUntil(i.expiry_date) <= 3)
           .map(i => i.item_name)
       );
       setPriorityItems(auto);
@@ -453,9 +463,7 @@ const RecipePage = () => {
     }
   };
 
-  const urgentCount = uniqueSorted.filter(i =>
-    Math.ceil((new Date(i.expiry_date) - today) / 86400000) <= 3
-  ).length;
+  const urgentCount = uniqueSorted.filter(i => daysUntil(i.expiry_date) <= 3).length;
 
   const visibleItems = showAllIngredients ? uniqueSorted : uniqueSorted.slice(0, 12);
 
@@ -553,7 +561,7 @@ const RecipePage = () => {
 
             <div className="flex flex-wrap gap-1.5">
               {visibleItems.map((item, i) => {
-                const days = Math.ceil((new Date(item.expiry_date) - today) / 86400000);
+                const days = daysUntil(item.expiry_date);
                 const isPriority = priorityItems.has(item.item_name);
                 const isUrgent = days <= 3;
                 return (

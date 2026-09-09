@@ -140,6 +140,17 @@ CREATE TABLE IF NOT EXISTS recommendation_logs (
     FOREIGN KEY (recipe_id) REFERENCES recipes(id)
 );
 
+-- 관리자 액션 감사 로그 — 기존에 코드(server.js auditLog)에서만 쓰이고 스키마에 빠져 있던 테이블 보강
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+    actor      VARCHAR(100) NOT NULL,
+    action     VARCHAR(100) NOT NULL,
+    target     VARCHAR(255),
+    detail     TEXT,
+    ip         VARCHAR(50),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS notices (
     id         INT AUTO_INCREMENT PRIMARY KEY,
     message    TEXT NOT NULL,
