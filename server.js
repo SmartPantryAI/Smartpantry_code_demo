@@ -1276,12 +1276,17 @@ app.get('/api/admin/waste-list', isAdminConsole, async (req, res) => {
 });
 
 // 스캔 로그 (이미지 포함)
+// image_data(원본 카메라 사진, 행당 최대 9MB대까지 확인됨)를 목록 조회에 포함시키면
+// 100건 합산 JSON이 V8 최대 문자열 길이를 넘어 JSON.stringify가 "RangeError: Invalid string
+// length"로 죽는다(실사용 중 발견 - 프론트는 이 실패를 그냥 "로그 없음"으로 보여줌). 목록에서는
+// image_data를 아예 빼고, 상세 조회 시에만 별도 엔드포인트(/api/admin/scan-logs/:id/image)로
+// 그 한 건의 이미지만 가져오게 한다.
 app.get('/api/admin/scan-logs', isAdminConsole, async (req, res) => {
     try {
         const rows = await query(`
             SELECT sl.id, sl.user_id, sl.mode, sl.source, sl.item_count,
                    sl.items_json, sl.status, sl.created_at,
-                   sl.image_data,
+                   (sl.image_data IS NOT NULL) AS has_image,
                    u.name AS user_name, u.email AS user_email
             FROM scan_logs sl
             JOIN users u ON sl.user_id = u.id
@@ -1290,7 +1295,16 @@ app.get('/api/admin/scan-logs', isAdminConsole, async (req, res) => {
         `);
         auditLog('admin', 'VIEW_SCAN_LOGS', null, null, req.ip);
         res.json(rows);
-    } catch { res.status(500).json({ success: false }); }
+    } catch (err) { console.error('스캔 로그 목록 조회 오류:', err.message); res.status(500).json({ success: false }); }
+});
+
+// 스캔 로그 이미지 (한 건만) - 목록 응답 크기 문제 때문에 목록과 분리
+app.get('/api/admin/scan-logs/:id/image', isAdminConsole, async (req, res) => {
+    try {
+        const rows = await query('SELECT image_data FROM scan_logs WHERE id = ?', [req.params.id]);
+        if (!rows.length) return res.status(404).json({ success: false, message: '로그를 찾을 수 없습니다.' });
+        res.json({ image_data: rows[0].image_data });
+    } catch (err) { console.error('스캔 로그 이미지 조회 오류:', err.message); res.status(500).json({ success: false }); }
 });
 
 // 스캔 로그 삭제
@@ -1475,6 +1489,22 @@ const sendExpiryPushNotifications = async () => {
 // ── 크론잡: 매일 오전 7시 / 오후 5시 30분 유통기한 임박/만료 푸시 알림 ──
 cron.schedule('0 7 * * *',  () => sendExpiryPushNotifications(), { timezone: 'Asia/Seoul' });
 cron.schedule('30 17 * * *', () => sendExpiryPushNotifications(), { timezone: 'Asia/Seoul' });
+
+// ── 크론잡: 매일 자정, 전시 데모 계정의 식재료(pantry)만 초기화 ──────
+// 계정 자체는 유지한다 - 계정을 지우면 약관 동의(is_agreed)가 초기화돼 재동의 화면이 뜨고,
+// 자정을 걸쳐 켜져 있던 세션은 끊긴다. 목적(며칠 지난 식재료 정리)엔 pantry만 비우면 충분하다.
+const resetDemoPantry = async () => {
+    try {
+        const result = await query(
+            'DELETE FROM pantry WHERE user_id = (SELECT id FROM users WHERE email = ?)',
+            [DEMO_USER_EMAIL]
+        );
+        console.log(`🔄 데모 계정 식재료 초기화 완료 (affected: ${result.affectedRows})`);
+    } catch (err) {
+        console.error('데모 식재료 초기화 실패:', err.message);
+    }
+};
+cron.schedule('0 0 * * *', resetDemoPantry, { timezone: 'Asia/Seoul' });
 
 // ── 관리자: 유통기한 알림 수동 테스트 발송 ───────────────────────
 app.post('/api/admin/push-test-expiry', isAdminConsole, async (req, res) => {
