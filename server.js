@@ -225,17 +225,39 @@ app.patch('/api/user/consents', isLoggedIn, async (req, res) => {
 // OAuth 없이 고정된 "사용자" 계정으로 즉시 로그인시킨다. 매번 새 계정이 생기지 않도록
 // 고정 이메일을 식별자로 find-or-create한다.
 const DEMO_USER_EMAIL = 'demo@smartpantry.local';
+
+// find-or-create 데모 계정 - /auth/demo-login과 scheduleDemoRestore(회원 탈퇴 후 재생성)가 공유
+const ensureDemoUser = async () => {
+    const rows = await query('SELECT * FROM users WHERE email = ?', [DEMO_USER_EMAIL]);
+    if (rows[0]) return rows[0];
+    const result = await query(
+        'INSERT INTO users (name, email, is_agreed) VALUES (?, ?, 0)',
+        ['사용자', DEMO_USER_EMAIL]
+    );
+    return { id: result.insertId, name: '사용자', email: DEMO_USER_EMAIL, is_agreed: 0, is_admin: 0 };
+};
+
+// 데모 계정의 무적 식재료(DEMO_PANTRY_SEED_ITEMS)가 데이터 초기화/회원 탈퇴로 사라졌을 때,
+// 다음날 자정 크론까지 기다리지 않고 10분 뒤 자동 복구한다.
+// recreateAccount=true면 계정(users row) 자체부터 다시 만든다 - 회원 탈퇴는 계정 row를
+// 통째로 지우므로(DELETE /api/user) seedDemoPantry만으로는 복구가 안 된다.
+// seedDemoPantry는 파일 하단에서 정의되지만, 이 함수는 요청/타이머로만 호출되고 그 시점엔
+// 모듈이 이미 전부 로드된 뒤이므로 클로저로 문제없이 참조된다.
+const scheduleDemoRestore = (recreateAccount = false) => {
+    setTimeout(async () => {
+        try {
+            if (recreateAccount) await ensureDemoUser();
+            await seedDemoPantry();
+            console.log(`🔁 데모 계정${recreateAccount ? ' 재생성 및' : ''} 무적 식재료 자동 복구 완료`);
+        } catch (err) {
+            console.error('데모 계정 자동 복구 실패:', err.message);
+        }
+    }, 10 * 60 * 1000);
+};
+
 app.get('/auth/demo-login', async (req, res) => {
     try {
-        const rows = await query('SELECT * FROM users WHERE email = ?', [DEMO_USER_EMAIL]);
-        let user = rows[0];
-        if (!user) {
-            const result = await query(
-                'INSERT INTO users (name, email, is_agreed) VALUES (?, ?, 0)',
-                ['사용자', DEMO_USER_EMAIL]
-            );
-            user = { id: result.insertId, name: '사용자', email: DEMO_USER_EMAIL, is_agreed: 0, is_admin: 0 };
-        }
+        const user = await ensureDemoUser();
         req.login(user, (err) => {
             if (err) { console.error('데모 로그인 오류:', err.message); return res.status(500).json({ success: false }); }
             req.session.save(() => res.redirect('/'));
@@ -268,6 +290,7 @@ app.put('/api/user/name', isLoggedIn, async (req, res) => {
 
 app.delete('/api/user', isLoggedIn, async (req, res) => {
     const userId = req.user.id;
+    const isDemoAccount = req.user.email === DEMO_USER_EMAIL;
     try {
         await query('DELETE FROM saved_recipes WHERE user_id = ?', [userId]);
         await query('DELETE FROM recommendation_logs WHERE user_id = ?', [userId]);
@@ -277,6 +300,7 @@ app.delete('/api/user', isLoggedIn, async (req, res) => {
         await query('DELETE FROM pantry WHERE user_id = ?', [userId]);
         await query('DELETE FROM social_accounts WHERE user_id = ?', [userId]);
         await query('DELETE FROM users WHERE id = ?', [userId]);
+        if (isDemoAccount) scheduleDemoRestore(true);
         req.logout(() => req.session.destroy(() => {
             res.clearCookie('connect.sid');
             res.json({ success: true });
@@ -496,6 +520,7 @@ app.post('/api/delete-items', isLoggedIn, async (req, res) => {
 app.post('/api/delete-all-items', isLoggedIn, async (req, res) => {
     try {
         await query('DELETE FROM pantry WHERE user_id = ?', [req.user.id]);
+        if (req.user.email === DEMO_USER_EMAIL) scheduleDemoRestore(false);
         res.json({ success: true });
     } catch { res.status(500).json({ success: false }); }
 });
