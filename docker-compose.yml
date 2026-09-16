@@ -41,6 +41,7 @@ services:
       - AI_SERVER_URL=http://ai:8000   # ← AI 서버 주소
       - OLLAMA_URL=${OLLAMA_URL:-https://gemma.aikopo.net}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4-e4b}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
     volumes:
       - .:/app
     restart: always
@@ -68,6 +69,7 @@ services:
     environment:
       - OLLAMA_URL=${OLLAMA_URL:-https://gemma.aikopo.net}
       - OLLAMA_MODEL=${OLLAMA_MODEL:-gemma4-e4b}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-}
       - LLM_TIMEOUT=${LLM_TIMEOUT:-120}
     ports:
       - "8000:8000"

@@ -18,10 +18,14 @@ const VAPID_PUBLIC_KEY  = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 webpush.setVapidDetails('mailto:sj297916@gmail.com', VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY);
 
-// ── LLM 설정 (.env에서 엔드포인트/모델 교체 가능, ai 컨테이너와 동일한 변수명 사용) ──
+// ── LLM 설정 (.env에서 엔드포인트/모델/API 키 교체 가능, ai 컨테이너와 동일한 변수명 사용) ──
+// OLLAMA_API_KEY는 선택값이다 - 비워두면(기본 gemma.aikopo.net처럼 인증이 필요없는
+// 엔드포인트) Authorization 헤더 자체를 안 붙인다.
 const OLLAMA_URL      = process.env.OLLAMA_URL   || 'https://gemma.aikopo.net';
 const OLLAMA_MODEL    = process.env.OLLAMA_MODEL || 'gemma4-e4b';
+const OLLAMA_API_KEY  = process.env.OLLAMA_API_KEY || '';
 const OLLAMA_CHAT_URL = `${OLLAMA_URL}/v1/chat/completions`;
+const OLLAMA_HEADERS  = OLLAMA_API_KEY ? { Authorization: `Bearer ${OLLAMA_API_KEY}` } : {};
 
 // ── 미들웨어 ──────────────────────────────────────────────────
 app.use(express.json({ limit: '20mb' }));
@@ -319,7 +323,7 @@ const guessCategory = async (name) => {
       temperature: 0,
       max_tokens: 50,
       response_format: { type: 'json_object' },
-    }, { timeout: 30000 });
+    }, { timeout: 30000, headers: OLLAMA_HEADERS });
 
     const raw = (data?.choices?.[0]?.message?.content || '').trim();
     let result = '';
@@ -361,7 +365,7 @@ const classifyCanonicalIngredient = async (itemName) => {
       temperature: 0,
       max_tokens: 50,
       response_format: { type: 'json_object' },
-    }, { timeout: 30000 });
+    }, { timeout: 30000, headers: OLLAMA_HEADERS });
 
     const raw = (data?.choices?.[0]?.message?.content || '').trim();
     let canonical = null;
@@ -556,7 +560,7 @@ app.post('/api/scan', isLoggedIn, async (req, res) => {
 // proxy_read_timeout(130초)보다 여유있게 짧다.
 async function callOllamaWithRetry(payload, retries = 1) {
     try {
-        return await axios.post(OLLAMA_CHAT_URL, payload, { timeout: 60000 });
+        return await axios.post(OLLAMA_CHAT_URL, payload, { timeout: 60000, headers: OLLAMA_HEADERS });
     } catch (err) {
         if (retries > 0) {
             console.warn('⚠️ Ollama 호출 실패, 재시도:', err.message);
@@ -1588,14 +1592,40 @@ const sendExpiryPushNotifications = async () => {
 cron.schedule('0 7 * * *',  () => sendExpiryPushNotifications(), { timezone: 'Asia/Seoul' });
 cron.schedule('30 17 * * *', () => sendExpiryPushNotifications(), { timezone: 'Asia/Seoul' });
 
+// ── 전시 데모 계정 기본 식재료 목록 ──────────────────────────────
+// 임박 5종(무적 유통기한, 항상 D-3으로 갱신) + 여유 5종(D-7, 5일 이상 여유) -
+// recipe_ingredients 실사용 빈도 상위 재료 위주로 골라서, 데모에서
+// "저장고 → 레시피 추천"을 눌렀을 때 데이터셋 매칭 레시피가 실제로 나오게 한다.
+// (범용 조미료는 채점에서 이미 보유한 것으로 가정돼 추천 결과에 영향이 없어 제외했다.)
+// 아래 두 크론잡이 이 목록을 공유한다: 자정 초기화에서는 제외 대상으로,
+// 00:01 갱신에서는 유통기한을 매일 고정값으로 되돌리는 대상으로 쓰인다.
+const DEMO_PANTRY_SEED_ITEMS = [
+    // 임박 (D-3, 무적 유통기한 - 매일 자정 지나면 항상 D-3로 고정)
+    { name: '파',     emoji: '🌿', foodCategory: '채소류',     storage: '냉장', days: 3, quantity: 1,   unit: '단' },
+    { name: '양파',   emoji: '🧅', foodCategory: '채소류',     storage: '실온', days: 3, quantity: 3,   unit: '개' },
+    { name: '돼지고기', emoji: '🐖', foodCategory: '육류',       storage: '냉장', days: 3, quantity: 300, unit: 'g' },
+    { name: '계란',   emoji: '🥚', foodCategory: '유제품·계란', storage: '냉장', days: 3, quantity: 10,  unit: '개' },
+    { name: '소시지', emoji: '🌭', foodCategory: '가공·즉석식품', storage: '냉장', days: 3, quantity: 1,   unit: '팩' },
+    // 여유 (D-7, 5일 이상 여유)
+    { name: '가지',     emoji: '🍆', foodCategory: '채소류',       storage: '냉장', days: 7, quantity: 3, unit: '개' },
+    { name: '오이',     emoji: '🥒', foodCategory: '채소류',       storage: '냉장', days: 7, quantity: 2, unit: '개' },
+    { name: '당근',     emoji: '🥕', foodCategory: '채소류',       storage: '냉장', days: 7, quantity: 2, unit: '개' },
+    { name: '배추',     emoji: '🥬', foodCategory: '채소류',       storage: '냉장', days: 7, quantity: 1, unit: '포기' },
+    { name: '냉동만두', emoji: '🥟', foodCategory: '가공·즉석식품', storage: '냉동', days: 7, quantity: 1, unit: '봉지' },
+];
+const DEMO_PANTRY_SEED_NAMES = DEMO_PANTRY_SEED_ITEMS.map(item => item.name);
+
 // ── 크론잡: 매일 자정, 전시 데모 계정의 식재료(pantry)만 초기화 ──────
 // 계정 자체는 유지한다 - 계정을 지우면 약관 동의(is_agreed)가 초기화돼 재동의 화면이 뜨고,
 // 자정을 걸쳐 켜져 있던 세션은 끊긴다. 목적(며칠 지난 식재료 정리)엔 pantry만 비우면 충분하다.
+// 기본 시드 10종(DEMO_PANTRY_SEED_ITEMS)은 여기서 지우지 않는다 - 유통기한 갱신은
+// 아래 seedDemoPantry가 UPDATE로 처리하므로, 여기서 지웠다 다시 넣을 필요가 없다.
 const resetDemoPantry = async () => {
     try {
+        const placeholders = DEMO_PANTRY_SEED_NAMES.map(() => '?').join(', ');
         const result = await query(
-            'DELETE FROM pantry WHERE user_id = (SELECT id FROM users WHERE email = ?)',
-            [DEMO_USER_EMAIL]
+            `DELETE FROM pantry WHERE user_id = (SELECT id FROM users WHERE email = ?) AND item_name NOT IN (${placeholders})`,
+            [DEMO_USER_EMAIL, ...DEMO_PANTRY_SEED_NAMES]
         );
         console.log(`🔄 데모 계정 식재료 초기화 완료 (affected: ${result.affectedRows})`);
     } catch (err) {
@@ -1604,25 +1634,9 @@ const resetDemoPantry = async () => {
 };
 cron.schedule('0 0 * * *', resetDemoPantry, { timezone: 'Asia/Seoul' });
 
-// ── 크론잡: 매일 00:01, 자정에 비운 데모 계정 저장고에 기본 식재료를 재투입 ──
-// 임박 3종 + 여유 7종 - recipe_ingredients 실사용 빈도 상위 재료 위주로 골라서,
-// 데모에서 "저장고 → 레시피 추천"을 눌렀을 때 데이터셋 매칭 레시피가 실제로 나오게 한다.
-// (범용 조미료는 채점에서 이미 보유한 것으로 가정돼 추천 결과에 영향이 없어 제외했다.)
-const DEMO_PANTRY_SEED_ITEMS = [
-    // 임박 (D-3)
-    { name: '돼지고기', emoji: '🐖', foodCategory: '육류',       storage: '냉장', days: 3,  quantity: 300, unit: 'g' },
-    { name: '두부',     emoji: '🧊', foodCategory: '두부·콩류',   storage: '냉장', days: 3,  quantity: 1,   unit: '모' },
-    { name: '새우',     emoji: '🍤', foodCategory: '수산물',     storage: '냉장', days: 3,  quantity: 200, unit: 'g' },
-    // 여유 (D-25)
-    { name: '양파', emoji: '🧅', foodCategory: '채소류',     storage: '실온', days: 25, quantity: 3,   unit: '개' },
-    { name: '마늘', emoji: '📦', foodCategory: '채소류',     storage: '냉장', days: 25, quantity: 1,   unit: '통' },
-    { name: '대파', emoji: '📦', foodCategory: '채소류',     storage: '냉장', days: 25, quantity: 1,   unit: '단' },
-    { name: '당근', emoji: '🥕', foodCategory: '채소류',     storage: '냉장', days: 25, quantity: 2,   unit: '개' },
-    { name: '감자', emoji: '🥔', foodCategory: '채소류',     storage: '실온', days: 25, quantity: 3,   unit: '개' },
-    { name: '달걀', emoji: '🥚', foodCategory: '유제품·계란', storage: '냉장', days: 25, quantity: 10,  unit: '개' },
-    { name: '간장', emoji: '🧂', foodCategory: '양념·소스',   storage: '실온', days: 25, quantity: 500, unit: 'ml' },
-];
-
+// ── 크론잡: 매일 00:01, 데모 계정의 기본 식재료 유통기한을 고정값으로 갱신 ──
+// 위 resetDemoPantry가 이 10종은 건드리지 않으므로, 이미 있으면 유통기한만
+// UPDATE로 되돌리고(항상 D-3/D-7 유지), 없으면(최초 실행 등) INSERT한다.
 const seedDemoPantry = async () => {
     try {
         const [demoUser] = await query('SELECT id FROM users WHERE email = ?', [DEMO_USER_EMAIL]);
@@ -1639,12 +1653,21 @@ const seedDemoPantry = async () => {
             await query('INSERT IGNORE INTO ingredients (name, emoji, category) VALUES (?, ?, ?)', [item.name, item.emoji, item.foodCategory]);
             await query('UPDATE ingredients SET category = ? WHERE name = ? AND category IS NULL', [item.foodCategory, item.name]);
             const [ing] = await query('SELECT id FROM ingredients WHERE name = ?', [item.name]);
-            await query(
-                'INSERT INTO pantry (user_id, ingredient_id, item_name, item_emoji, expiry_date, category, quantity, unit, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                [demoUser.id, ing?.id || null, item.name, item.emoji, expiryStr, item.storage, item.quantity, item.unit, 'manual']
-            );
+
+            const [existing] = await query('SELECT id FROM pantry WHERE user_id = ? AND item_name = ?', [demoUser.id, item.name]);
+            if (existing) {
+                await query(
+                    'UPDATE pantry SET expiry_date = ?, quantity = ?, unit = ?, category = ? WHERE id = ?',
+                    [expiryStr, item.quantity, item.unit, item.storage, existing.id]
+                );
+            } else {
+                await query(
+                    'INSERT INTO pantry (user_id, ingredient_id, item_name, item_emoji, expiry_date, category, quantity, unit, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    [demoUser.id, ing?.id || null, item.name, item.emoji, expiryStr, item.storage, item.quantity, item.unit, 'manual']
+                );
+            }
         }
-        console.log(`🌱 데모 계정 기본 식재료 ${DEMO_PANTRY_SEED_ITEMS.length}종 재투입 완료`);
+        console.log(`🌱 데모 계정 기본 식재료 ${DEMO_PANTRY_SEED_ITEMS.length}종 갱신 완료`);
     } catch (err) {
         console.error('데모 식재료 시드 실패:', err.message);
     }

@@ -32,6 +32,9 @@ except Exception as _rag_a_err:
 OLLAMA_URL = os.getenv("OLLAMA_URL", "https://gemma.aikopo.net")
 MODEL      = os.getenv("OLLAMA_MODEL", "gemma4-e4b")
 LLM_TIMEOUT = int(os.getenv("LLM_TIMEOUT", "120"))
+# 선택값 - 비워두면(기본 gemma.aikopo.net처럼 인증이 필요없는 엔드포인트) 헤더 없이 호출한다.
+OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "")
+OLLAMA_HEADERS = {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {}
 
 VALID_STORAGE = {"냉장", "냉동", "실온"}
 VALID_UNITS = {"개", "g", "ml"}
@@ -616,7 +619,7 @@ def stream_llm(payload: dict) -> str:
     # reasoning(사고 과정)이 별도로 오는 경우 delta.reasoning_content로 온다(Ollama의 thinking에 대응).
     try:
         resp = requests.post(f"{OLLAMA_URL}/v1/chat/completions",
-                             json=payload, stream=True, timeout=LLM_TIMEOUT)
+                             json=payload, headers=OLLAMA_HEADERS, stream=True, timeout=LLM_TIMEOUT)
         resp.raise_for_status()
     except requests.RequestException as e:
         print(f"[LLM 오류] {e}")

@@ -15,7 +15,7 @@ try:
 except ImportError:
     PIL_AVAILABLE = False
 
-from pipeline_common import calculate_use_by, resolve_package_unit, OLLAMA_URL, MODEL
+from pipeline_common import calculate_use_by, resolve_package_unit, OLLAMA_URL, MODEL, OLLAMA_HEADERS
 
 VALID_STORAGE = {"냉장", "냉동", "실온"}
 VALID_CATEGORIES = {
@@ -118,7 +118,7 @@ def stream_llm(payload: dict) -> str:
     # 실패 시 빈 문자열을 반환해 "0개 인식"으로 안전하게 실패하도록 한다.
     try:
         resp = requests.post(f"{OLLAMA_URL}/v1/chat/completions",
-                             json=payload, stream=True, timeout=300)
+                             json=payload, headers=OLLAMA_HEADERS, stream=True, timeout=300)
         resp.raise_for_status()
     except requests.RequestException as e:
         print(f"[LLM 오류] {e}")
