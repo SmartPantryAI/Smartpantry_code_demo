@@ -7,6 +7,7 @@ export default defineConfig({
     // 도메인 허용 설정 (에러 해결 핵심!)
     allowedHosts: [
       'smpa.aikopo.net',
+      'smartpantry.aikopo.net',
       'localhost'
     ],
     host: true, // 외부 접속 허용
