@@ -238,7 +238,7 @@ const ensureDemoUser = async () => {
 };
 
 // 데모 계정의 무적 식재료(DEMO_PANTRY_SEED_ITEMS)가 데이터 초기화/회원 탈퇴로 사라졌을 때,
-// 다음날 자정 크론까지 기다리지 않고 10분 뒤 자동 복구한다.
+// 다음날 자정 크론까지 기다리지 않고 5분 뒤 자동 복구한다.
 // recreateAccount=true면 계정(users row) 자체부터 다시 만든다 - 회원 탈퇴는 계정 row를
 // 통째로 지우므로(DELETE /api/user) seedDemoPantry만으로는 복구가 안 된다.
 // seedDemoPantry는 파일 하단에서 정의되지만, 이 함수는 요청/타이머로만 호출되고 그 시점엔
@@ -252,7 +252,18 @@ const scheduleDemoRestore = (recreateAccount = false) => {
         } catch (err) {
             console.error('데모 계정 자동 복구 실패:', err.message);
         }
-    }, 10 * 60 * 1000);
+    }, 5 * 60 * 1000);
+};
+
+// 무적 식재료 10종 중 하나라도 수동으로 건드리면(수량을 줄이거나, 개별/다중 삭제하거나,
+// 상태를 변경하거나, 요리 완료 처리로 소진하는 등 - 탈퇴/전체삭제를 거치지 않아도) 위와
+// 동일하게 5분 뒤 자동 복구되게 한다. DEMO_PANTRY_SEED_NAMES는 파일 하단에서 정의되지만,
+// 이 함수도 요청 시점에만 호출되므로 클로저로 문제없이 참조된다.
+const maybeRestoreDemoSeed = (user, itemNames) => {
+    if (user?.email !== DEMO_USER_EMAIL) return;
+    if (itemNames.some(name => DEMO_PANTRY_SEED_NAMES.includes(name))) {
+        scheduleDemoRestore(false);
+    }
 };
 
 app.get('/auth/demo-login', async (req, res) => {
@@ -484,6 +495,10 @@ app.patch('/api/pantry/:id', isLoggedIn, async (req, res) => {
     values.push(req.params.id, req.user.id);
     try {
         await query(`UPDATE pantry SET ${updates.join(', ')} WHERE id = ? AND user_id = ?`, values);
+        if (req.user.email === DEMO_USER_EMAIL) {
+            const [row] = await query('SELECT item_name FROM pantry WHERE id = ?', [req.params.id]);
+            if (row) maybeRestoreDemoSeed(req.user, [row.item_name]);
+        }
         res.json({ success: true });
     } catch (err) { console.error(err); res.status(500).json({ success: false }); }
 });
@@ -494,12 +509,20 @@ app.patch('/api/pantry/:id/status', isLoggedIn, async (req, res) => {
     if (!allowed.includes(status)) return res.status(400).json({ success: false });
     try {
         await query('UPDATE pantry SET status = ? WHERE id = ? AND user_id = ?', [status, req.params.id, req.user.id]);
+        if (req.user.email === DEMO_USER_EMAIL) {
+            const [row] = await query('SELECT item_name FROM pantry WHERE id = ?', [req.params.id]);
+            if (row) maybeRestoreDemoSeed(req.user, [row.item_name]);
+        }
         res.json({ success: true });
     } catch { res.status(500).json({ success: false }); }
 });
 
 app.delete('/api/delete-item/:id', isLoggedIn, async (req, res) => {
     try {
+        if (req.user.email === DEMO_USER_EMAIL) {
+            const [row] = await query('SELECT item_name FROM pantry WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+            if (row) maybeRestoreDemoSeed(req.user, [row.item_name]);
+        }
         await query('DELETE FROM pantry WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
         res.json({ success: true });
     } catch { res.status(500).json({ success: false }); }
@@ -509,6 +532,10 @@ app.post('/api/delete-items', isLoggedIn, async (req, res) => {
     const { ids } = req.body;
     if (!Array.isArray(ids) || !ids.length) return res.status(400).json({ success: false });
     try {
+        if (req.user.email === DEMO_USER_EMAIL) {
+            const seedRows = await query('SELECT item_name FROM pantry WHERE id IN (?) AND user_id = ?', [ids, req.user.id]);
+            maybeRestoreDemoSeed(req.user, seedRows.map(r => r.item_name));
+        }
         const result = await query('DELETE FROM pantry WHERE id IN (?) AND user_id = ?', [ids, req.user.id]);
         res.json({ success: true, deletedCount: result.affectedRows });
     } catch (err) {
@@ -1496,6 +1523,7 @@ app.post('/api/pantry/cook', isLoggedIn, async (req, res) => {
         await conn.beginTransaction();
 
         let updatedCount = 0;
+        const touchedNames = [];
         for (const ingredient of used_ingredients) {
             const isObj        = typeof ingredient === 'object' && ingredient !== null;
             const rawName      = isObj ? ingredient.name : ingredient;
@@ -1525,6 +1553,7 @@ app.post('/api/pantry/cook', isLoggedIn, async (req, res) => {
             }
             const item = rows[0];
             if (!item) continue;
+            touchedNames.push(item.item_name);
 
             const actualQty = usedQty !== null ? usedQty : Number(item.quantity);
             if (!Number.isFinite(actualQty) || actualQty < 0) continue;
@@ -1547,6 +1576,7 @@ app.post('/api/pantry/cook', isLoggedIn, async (req, res) => {
         }
 
         await conn.commit();
+        maybeRestoreDemoSeed(req.user, touchedNames);
         res.json({ success: true, updatedCount });
     } catch (err) {
         if (conn) await conn.rollback();
