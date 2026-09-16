@@ -130,7 +130,11 @@ const MainPage = () => {
   const getDiffDays = (targetDate) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    // "YYYY-MM-DD" 형태의 날짜 전용 문자열은 UTC 자정으로 파싱된다(KST 기준 오전 9시) -
+    // 로컬 자정인 today와 그대로 빼면 9시간이 남아 Math.ceil이 하루를 더 얹는다
+    // (실제 D-3인 재료가 D-4로 표시됨). target도 로컬 자정으로 맞춰야 한다.
     const target = new Date(targetDate.replace(/\./g, '-'));
+    target.setHours(0, 0, 0, 0);
     return Math.ceil((target - today) / (1000 * 60 * 60 * 24));
   };
 

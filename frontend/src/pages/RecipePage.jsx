@@ -510,7 +510,7 @@ const RecipePage = () => {
             )}
             <div className="flex flex-wrap gap-1.5">
               {sorted.slice(0, 10).map((item, i) => {
-                const days = Math.ceil((new Date(item.expiry_date) - today) / 86400000);
+                const days = daysUntil(item.expiry_date);
                 return (
                   <span key={i} className={`text-xs font-bold px-2.5 py-1 rounded-full border ${
                     days <= 3 ? 'bg-red-50 text-red-600 border-red-100' : 'bg-gray-50 text-gray-500 border-gray-100'

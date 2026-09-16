@@ -94,7 +94,9 @@ const UserDetailPage = ({ user, onClose, onDeleted }) => {
             {pantry.length === 0
               ? <p className="text-xs text-gray-400 text-center py-8">등록된 식재료 없음</p>
               : pantry.map(item => {
-                const days = Math.ceil((new Date(item.expiry_date) - today) / 86400000);
+                const expiry = new Date(item.expiry_date);
+                expiry.setHours(0, 0, 0, 0);
+                const days = Math.ceil((expiry - today) / 86400000);
                 return (
                   <div key={item.id} className="flex items-center gap-2.5">
                     <span className="text-lg shrink-0">{item.item_emoji || '📦'}</span>
