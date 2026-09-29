@@ -53,9 +53,23 @@ export const PACKAGE_TO_COUNT = {
 
 const _SORTED_PACKAGE_KEYS = Object.keys(PACKAGE_TO_COUNT).sort((a, b) => b.length - a.length);
 
+// "파"/"김"처럼 1글자 키는 스파게티/파슬리/파마산이나 튀김/김치처럼 무관한 재료명에도 그
+// 글자가 우연히 포함될 수 있다(server.js의 RESTRICTED_SHORT_INGREDIENTS와 동일한 문제 - 예:
+// "스파게티"를 "단→개" 환산할 때 무관하게 파의 6배 비율이 걸릴 뻔했다). 더 구체적인 키(예:
+// "쪽파")가 먼저 매칭되면 이 목록까지 안 내려가므로, 여기 등록된 무관 단어만 걸러낸다.
+const SHORT_KEY_EXCLUSIONS = {
+  '파': ['스파게티', '파슬리', '파마산', '파프리카', '파스타'],
+  '김': ['튀김', '김치'],
+};
+
+const isShortKeyExcluded = (key, ingredientName) => {
+  const excluded = SHORT_KEY_EXCLUSIONS[key];
+  return excluded ? excluded.some(w => ingredientName.includes(w)) : false;
+};
+
 const findPackageRatio = (ingredientName, unit) => {
   if (!ingredientName) return null;
-  const key = _SORTED_PACKAGE_KEYS.find(k => ingredientName.includes(k));
+  const key = _SORTED_PACKAGE_KEYS.find(k => ingredientName.includes(k) && !isShortKeyExcluded(k, ingredientName));
   if (!key) return null;
   return PACKAGE_TO_COUNT[key][unit] ?? null;
 };

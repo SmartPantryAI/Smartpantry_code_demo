@@ -3,6 +3,7 @@ import { Clock, CheckCircle2, RefreshCw, ChevronDown, ChevronUp, AlertCircle, He
 import FoodIcon from '../components/FoodIcon';
 import { formatPantryQuantity } from '../utils/quantityFormat';
 import { convertQuantity } from '../utils/unitConvert';
+import { pantryNameMatches } from '../utils/ingredientMatch';
 
 const FOOD_EMOJIS = [
   '🍳', '🥘', '🍲', '🥗', '🍜', '🍱', '🥙', '🫕',
@@ -49,9 +50,7 @@ const CookModal = ({ recipe, pantryItems, onClose, onConfirm }) => {
       const parsedName = ing.name;
       const parsedQty  = ing.amount;
       const parsedUnit = ing.unit;
-      const pantryItem = pantryItems.find(p =>
-        p.item_name.includes(parsedName) || parsedName.includes(p.item_name)
-      );
+      const pantryItem = pantryItems.find(p => pantryNameMatches(p.item_name, parsedName));
       if (!pantryItem) continue; // 저장고에 없는 재료는 제외
 
       const maxQty = Number(pantryItem.quantity);
