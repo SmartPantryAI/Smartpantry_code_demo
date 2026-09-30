@@ -671,6 +671,38 @@ const SUBSTRING_FALSE_POSITIVES = {
     '대추': ['대추야자', '씨를 제거한 대추야자'],
     // "김밥용김"은 밥이 아니라 김(재료명) 상품 설명이다 - 영향은 적지만 같은 패턴이라 포함.
     '밥': ['김밥용김'],
+    // 김치/젓갈은 원재료를 발효·가공한 별개의 완제품이다 - "배추가 있다"가 "배추김치가 있다"를
+    // 보장하지 않는다(실사용 중 발견: 배추 보유 시 배추김치가 필요한 레시피가 보유 재료로 잘못
+    // 표시됨). DB 전수조사로 "X" / "X김치" / "X젓갈"이 둘 다 실제로 쓰이는 재료인 쌍을 찾아 전부
+    // 등록했다 - 멸치/새우의 젓갈 예외(위)와 같은 원칙이다.
+    '배추': ['배추김치'],
+    '열무': ['열무김치'],
+    '전어': ['전어젓갈'],
+};
+
+// 사이시옷(받침 ㅅ) 표기 차이로 실제로는 같은 재료인데 substring으로도 유사도로도 안 잡히는
+// 쌍들이다(예: "고추"+"가루"→"고춧가루"에서 추→춧으로 바뀜 - 글자 자체가 달라져 부분 문자열
+// 매칭이 실패하고, 길이 차이가 커서 NAME_SIMILARITY_THRESHOLD도 못 넘는다). threshold를
+// 낮추는 식으로 일반화하면 무관한 재료끼리 오매칭될 위험이 커지므로(예: "부추"/"상추"도 다시
+// 가까워짐), DB 전수조사(유니코드 자모 분해로 "글자+ㅅ받침" 패턴 탐지)로 찾은 것 중 실제로
+// 동일 재료인 쌍만 화이트리스트로 명시 등록한다. 같은 사이시옷 패턴이어도 실제로는 다른
+// 식재료인 경우(예: "깨"→"깻잎" - 깻잎은 참깨가 아니라 들깨 잎이다)는 절대 넣지 않는다 -
+// 그런 건 지금처럼 안 잡히는 게 맞는 동작이다.
+const SAISIOT_EQUIVALENTS = {
+    '고추': ['고춧가루', '고춧기름'],
+    '후추': ['후춧가루'],
+    '흰후추': ['흰후춧가루'],
+    '배추': ['배춧잎'],
+    '김치': ['김칫국물'],
+    '멸치': ['멸칫국물'],
+    '조개': ['조갯살'],
+    '계피': ['계핏가루'],
+    '들깨': ['들깻가루'],
+};
+
+const isSaisiotEquivalent = (shortName, longName) => {
+    const variants = SAISIOT_EQUIVALENTS[shortName];
+    return variants ? variants.includes(longName) : false;
 };
 
 const isSubstringFalsePositive = (shortName, longName) => {
@@ -692,8 +724,11 @@ const RESTRICTED_SHORT_INGREDIENTS = {
     // "무"(無, ~없는)는 "무가당"/"무염"/"무지개"/"무화과"/"허무스"/"무명실"처럼 무관한 단어의
     // 접두어·구성음절로도 쓰여서 "파"만큼 심각하다(실측: DB에서 "무"가 들어간 재료 24종 중
     // 절반 이상이 무 채소와 무관함). 진짜 무 계열만 화이트리스트로 인정한다.
+    // "열무김치"는 열무를 발효시킨 가공식품이라 원재료 무/열무와는 별개로 취급한다(아래
+    // SUBSTRING_FALSE_POSITIVES의 '배추'→'배추김치'와 동일한 원칙 - 김치류는 원재료의
+    // "있음"을 보장하지 않는다).
     '무': ['무', '단무지', '동치미무', '무,래디쉬', '무말랭이', '무순', '무즙', '무채', '순무',
-           '스웨이드(서양 순무)', '열무', '열무김치', '육수용 무', '절임무', '총각무'],
+           '스웨이드(서양 순무)', '열무', '육수용 무', '절임무', '총각무'],
     // "배"(pear)의 수집 결과 대부분이 실제로는 "배추/양배추"(cabbage) 계열이었다(둘은 전혀
     // 다른 채소/과일이다) - 진짜 배(과일)만 인정한다.
     '배': ['배', '배즙'],
@@ -755,6 +790,9 @@ const nameSimilarity = (a, b) => {
 
 // pantry/CookModal/pantry-cook에서 쓰는 것과 동일한 양방향 부분 문자열 매칭 + 유사도 안전망
 const nameMatches = (pantryName, ingredientName) => {
+    if (isSaisiotEquivalent(pantryName, ingredientName) || isSaisiotEquivalent(ingredientName, pantryName)) {
+        return true;
+    }
     if (isSubstringFalsePositive(pantryName, ingredientName) || isSubstringFalsePositive(ingredientName, pantryName)) {
         return false;
     }
